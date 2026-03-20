@@ -1,0 +1,65 @@
+<Layouts.app flash={@flash} current_scope={@current_scope}>
+  <div class="mx-auto max-w-sm space-y-4">
+    <div class="text-center">
+      <.header>
+        <p>Log in</p>
+        <:subtitle>
+          <%= if @current_scope do %>
+            Re-enter your password to continue.
+          <% else %>
+            No account yet?
+            <.link navigate={~p"/users/register"} class="font-semibold text-brand hover:underline" phx-no-format>Sign up</.link>.
+          <% end %>
+        </:subtitle>
+      </.header>
+    </div>
+
+    <.form :let={f} for={@form} as={:user} id="login_form_password" action={~p"/users/log-in"}>
+      <.input
+        readonly={!!@current_scope}
+        field={f[:email]}
+        type="email"
+        label="Email"
+        autocomplete="username"
+        spellcheck="false"
+        required
+        phx-mounted={JS.focus()}
+      />
+      <.input
+        field={f[:password]}
+        type="password"
+        label="Password"
+        autocomplete="current-password"
+        spellcheck="false"
+      />
+      <.button class="btn btn-primary w-full" name={@form[:remember_me].name} value="true">
+        Log in
+      </.button>
+    </.form>
+
+    <div class="divider text-xs text-base-content/40">or</div>
+
+    <div :if={local_mail_adapter?()} class="alert alert-info text-sm">
+      <.icon name="hero-information-circle" class="size-5 shrink-0" />
+      <span>
+        Using local mail adapter —
+        <.link href="/dev/mailbox" class="underline">view sent emails</.link>.
+      </span>
+    </div>
+
+    <.form :let={f} for={@form} as={:user} id="login_form_magic" action={~p"/users/log-in"}>
+      <.input
+        readonly={!!@current_scope}
+        field={f[:email]}
+        type="email"
+        label="Email"
+        autocomplete="username"
+        spellcheck="false"
+        required
+      />
+      <.button class="btn btn-ghost btn-outline w-full">
+        Send magic link
+      </.button>
+    </.form>
+  </div>
+</Layouts.app>

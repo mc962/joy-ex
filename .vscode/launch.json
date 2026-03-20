@@ -1,0 +1,56 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "mix phx.server",
+      "type": "mix_task",
+      "request": "launch",
+      "task": "phx.server",
+      "projectDir": "${workspaceRoot}",
+      "env": {
+        "MIX_ENV": "dev"
+      }
+    },
+    {
+      "name": "mix phx.server (debug)",
+      "type": "mix_task",
+      "request": "launch",
+      "task": "phx.server",
+      "projectDir": "${workspaceRoot}",
+      "requireFiles": [
+        "test/**/test_helper.exs",
+        "lib/**/*.*"
+      ],
+      "env": {
+        "MIX_ENV": "dev"
+      }
+    },
+    {
+      "name": "mix test",
+      "type": "mix_task",
+      "request": "launch",
+      "task": "test",
+      "taskArgs": ["--trace"],
+      "startApps": true,
+      "projectDir": "${workspaceRoot}",
+      "requireFiles": [
+        "test/**/test_helper.exs",
+        "test/**/*_test.exs"
+      ],
+      "env": {
+        "MIX_ENV": "test"
+      }
+    },
+    {
+      "name": "mix credo",
+      "type": "mix_task",
+      "request": "launch",
+      "task": "credo",
+      "taskArgs": ["--strict"],
+      "projectDir": "${workspaceRoot}",
+      "env": {
+        "MIX_ENV": "dev"
+      }
+    }
+  ]
+}
