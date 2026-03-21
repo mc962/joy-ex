@@ -76,6 +76,7 @@ defmodule Joy.MixProject do
       {:hackney, "~> 1.18"},
       # Redis destination adapter
       {:redix, "~> 1.3"},
+      {:horde, "~> 0.9"},
       {:credo, "~> 1.7"}
     ]
   end

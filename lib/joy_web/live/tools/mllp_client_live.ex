@@ -2,17 +2,33 @@ defmodule JoyWeb.Tools.MllpClientLive do
   @moduledoc "MLLP test client: one-off Send mode and concurrent Stress Test mode."
   use JoyWeb, :live_view
 
-  @sample_messages %{
-    "ADT^A01" => """
-    MSH|^~\\&|SendApp|SendFac|RecvApp|RecvFac|20240101120000||ADT^A01|MSG00001|P|2.5\rEVN|A01|20240101120000\rPID|1||123456^^^MRN^MR||Smith^John^A||19800101|M|||123 Main St^^Springfield^IL^62701||555-555-1234|||S||123456789\rPV1|1|I|2-3-04^201^01||||456789^Doctor^Jane|||SUR||||1|||456789^Doctor^Jane|IP||1|A0\r
-    """ |> String.trim(),
-    "ORU^R01" => """
-    MSH|^~\\&|LAB|LAB_FAC|RCV|RCV_FAC|20240101130000||ORU^R01|MSG00002|P|2.5\rPID|1||789012^^^MRN^MR||Jones^Mary||19751215|F\rOBR|1|ORD001|RES001|80048^BASIC METABOLIC PANEL^CPT|||20240101110000|||||||||456789^Doctor^Jane\rOBX|1|NM|2951-2^SODIUM^LN||140|mmol/L|136-145||||F\rOBX|2|NM|2823-3^POTASSIUM^LN||4.1|mmol/L|3.5-5.0||||F\r
-    """ |> String.trim(),
-    "ORM^O01" => """
-    MSH|^~\\&|OE|OE_FAC|LAB|LAB_FAC|20240101140000||ORM^O01|MSG00003|P|2.5\rPID|1||345678^^^MRN^MR||Brown^Robert||19900520|M\rORC|NW|ORD002||||||20240101140000|||456789^Doctor^Jane\rOBR|1|ORD002||85025^CBC^CPT|||20240101140000\r
-    """ |> String.trim()
-  }
+  @stress_message_types %{"adt_a01" => :adt_a01, "oru_r01" => :oru_r01, "orm_o01" => :orm_o01}
+
+  defp build_sample_messages do
+    now = DateTime.utc_now() |> Calendar.strftime("%Y%m%d%H%M%S")
+    ctrl = fn -> :crypto.strong_rand_bytes(4) |> Base.encode16() end
+
+    %{
+      "ADT^A01" =>
+        "MSH|^~\\&|SendApp|SendFac|RecvApp|RecvFac|#{now}||ADT^A01|#{ctrl.()}|P|2.5\r" <>
+        "EVN|A01|#{now}\r" <>
+        "PID|1||123456^^^MRN^MR||Smith^John^A||19800101|M|||123 Main St^^Springfield^IL^62701||555-555-1234|||S||123456789\r" <>
+        "PV1|1|I|2-3-04^201^01||||456789^Doctor^Jane|||SUR||||1|||456789^Doctor^Jane|IP||1|A0\r",
+
+      "ORU^R01" =>
+        "MSH|^~\\&|LAB|LAB_FAC|RCV|RCV_FAC|#{now}||ORU^R01|#{ctrl.()}|P|2.5\r" <>
+        "PID|1||789012^^^MRN^MR||Jones^Mary||19751215|F\r" <>
+        "OBR|1|ORD001|RES001|80048^BASIC METABOLIC PANEL^CPT|||#{now}\r" <>
+        "OBX|1|NM|2951-2^SODIUM^LN||140|mmol/L|136-145||||F\r" <>
+        "OBX|2|NM|2823-3^POTASSIUM^LN||4.1|mmol/L|3.5-5.0||||F\r",
+
+      "ORM^O01" =>
+        "MSH|^~\\&|OE|OE_FAC|LAB|LAB_FAC|#{now}||ORM^O01|#{ctrl.()}|P|2.5\r" <>
+        "PID|1||345678^^^MRN^MR||Brown^Robert||19900520|M\r" <>
+        "ORC|NW|ORD002||||||#{now}|||456789^Doctor^Jane\r" <>
+        "OBR|1|ORD002||85025^CBC^CPT|||#{now}\r"
+    }
+  end
 
   @impl true
   def mount(_params, _session, socket) do
@@ -21,6 +37,7 @@ defmodule JoyWeb.Tools.MllpClientLive do
       nil -> 4000
       ch -> ch.mllp_port
     end)
+    samples = build_sample_messages()
 
     {:ok,
      socket
@@ -29,7 +46,8 @@ defmodule JoyWeb.Tools.MllpClientLive do
      |> assign(:active_tab, :send)
      |> assign(:host, "localhost")
      |> assign(:port, to_string(default_port))
-     |> assign(:hl7_message, @sample_messages["ADT^A01"])
+     |> assign(:samples, samples)
+     |> assign(:hl7_message, samples["ADT^A01"])
      # Send tab
      |> assign(:send_loading, false)
      |> assign(:send_task_ref, nil)
@@ -38,6 +56,7 @@ defmodule JoyWeb.Tools.MllpClientLive do
      |> assign(:stress_count, "20")
      |> assign(:stress_concurrency, "5")
      |> assign(:stress_delay_ms, "0")
+     |> assign(:stress_message_type, "adt_a01")
      |> assign(:stress_running, false)
      |> assign(:stress_task_ref, nil)
      |> assign(:stress_task_pid, nil)
@@ -55,9 +74,10 @@ defmodule JoyWeb.Tools.MllpClientLive do
   end
 
   def handle_event("load_sample", %{"type" => type}, socket) do
-    case Map.get(@sample_messages, type) do
+    samples = build_sample_messages()
+    case Map.get(samples, type) do
       nil -> {:noreply, socket}
-      msg -> {:noreply, assign(socket, :hl7_message, msg)}
+      msg -> {:noreply, assign(socket, samples: samples, hl7_message: msg)}
     end
   end
 
@@ -92,18 +112,17 @@ defmodule JoyWeb.Tools.MllpClientLive do
   end
 
   def handle_event("run_stress", _params, socket) do
-    with {:ok, _} <- validate_hl7(socket.assigns.hl7_message),
-         {:ok, port} <- parse_port(socket.assigns.port),
+    with {:ok, port} <- parse_port(socket.assigns.port),
          {:ok, count} <- parse_positive_int(socket.assigns.stress_count, "Count"),
          {:ok, concurrency} <- parse_positive_int(socket.assigns.stress_concurrency, "Concurrency"),
          {:ok, delay_ms} <- parse_non_neg_int(socket.assigns.stress_delay_ms, "Delay") do
       host = socket.assigns.host
-      hl7 = socket.assigns.hl7_message
+      message_type = @stress_message_types[socket.assigns.stress_message_type] || :adt_a01
       caller = self()
 
       task =
         Task.Supervisor.async_nolink(Joy.TransformSupervisor, fn ->
-          Joy.MLLP.StressTest.run(caller, host, port, hl7, count, concurrency,
+          Joy.MLLP.StressTest.run(caller, host, port, message_type, count, concurrency,
             delay_ms: delay_ms
           )
         end)
@@ -437,28 +456,29 @@ defmodule JoyWeb.Tools.MllpClientLive do
           </div>
         </div>
 
-        <%!-- Stress message textarea (shared) --%>
+        <%!-- Message type selector --%>
         <div class="card bg-base-100 border border-base-300">
           <div class="card-body py-4 px-5 space-y-3">
-            <div class="flex items-center gap-3">
-              <span class="text-xs text-base-content/60 font-medium">Load sample:</span>
-              <button
-                :for={type <- ["ADT^A01", "ORU^R01", "ORM^O01"]}
-                phx-click="load_sample"
-                phx-value-type={type}
-                class="btn btn-xs btn-ghost border border-base-300"
-                disabled={@stress_running}
-              >
-                {type}
-              </button>
+            <div>
+              <p class="text-xs font-medium text-base-content/60 mb-2">Message type</p>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  :for={{label, value} <- [{"ADT^A01 — Admission", "adt_a01"}, {"ORU^R01 — Lab Result", "oru_r01"}, {"ORM^O01 — Order", "orm_o01"}]}
+                  phx-click="update_field"
+                  phx-value-field="stress_message_type"
+                  phx-value-value={value}
+                  class={"btn btn-sm #{if @stress_message_type == value, do: "btn-primary", else: "btn-ghost border border-base-300"}"}
+                  disabled={@stress_running}
+                >
+                  {label}
+                </button>
+              </div>
             </div>
-            <textarea
-              class="textarea textarea-bordered font-mono text-xs w-full h-36 resize-y"
-              phx-blur="update_message"
-              phx-value-value={@hl7_message}
-              name="hl7_message"
-              disabled={@stress_running}
-            >{@hl7_message}</textarea>
+            <p class="text-xs text-base-content/40">
+              Each message is generated with randomized patient data (MRN, name, DOB, values).
+              Messages are tagged with <code class="font-mono">MSH.3=JoyStress</code> and
+              <code class="font-mono">MRN=STRESS-xxxxxx</code> for easy identification and filtering.
+            </p>
           </div>
         </div>
 

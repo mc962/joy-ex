@@ -23,6 +23,7 @@ defmodule Joy.MLLP.Connection do
   """
 
   use GenServer
+  import Bitwise
   require Logger
 
   def start_link({channel_id, socket}) do
@@ -40,9 +41,18 @@ defmodule Joy.MLLP.Connection do
 
   @impl true
   def init({channel_id, socket}) do
-    # Set active: true so TCP data arrives as messages to this process
-    :inet.setopts(socket, active: true)
-    {:ok, %{channel_id: channel_id, socket: socket, buffer: ""}}
+    channel = Joy.Repo.get!(Joy.Channels.Channel, channel_id)
+
+    case check_peer_ip(socket, channel.allowed_ips) do
+      :ok ->
+        :inet.setopts(socket, active: true)
+        {:ok, %{channel_id: channel_id, socket: socket, buffer: ""}}
+
+      {:rejected, peer_ip} ->
+        Logger.warning("[MLLP.Connection] Rejected connection from #{peer_ip} — not in allowlist for channel #{channel_id}")
+        :gen_tcp.close(socket)
+        {:stop, :normal}
+    end
   end
 
   @impl true
@@ -110,7 +120,7 @@ defmodule Joy.MLLP.Connection do
   end
 
   defp dispatch_to_pipeline(channel_id, entry_id) do
-    case Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
       [{pid, _}] -> GenServer.cast(pid, {:process, entry_id})
       [] -> Logger.warning("[MLLP.Connection] Pipeline not found for channel #{channel_id}")
     end
@@ -119,6 +129,46 @@ defmodule Joy.MLLP.Connection do
   defp generate_control_id do
     :crypto.strong_rand_bytes(6) |> Base.encode16()
   end
+
+  # Returns :ok if the peer IP is permitted, {:rejected, ip_string} otherwise.
+  # An empty allowlist means accept from any IP.
+  defp check_peer_ip(_socket, []), do: :ok
+
+  defp check_peer_ip(socket, allowed_ips) do
+    case :inet.peername(socket) do
+      {:ok, {ip_tuple, _port}} ->
+        peer_str = ip_tuple |> :inet.ntoa() |> to_string()
+        if Enum.any?(allowed_ips, &ip_matches?(peer_str, ip_tuple, &1)),
+          do: :ok,
+          else: {:rejected, peer_str}
+
+      {:error, _} ->
+        # Can't determine peer address; allow rather than silently drop.
+        :ok
+    end
+  end
+
+  defp ip_matches?(peer_str, peer_tuple, entry) do
+    case String.split(entry, "/", parts: 2) do
+      [ip] -> peer_str == ip
+      [network_str, prefix_str] -> cidr_match?(peer_tuple, network_str, String.to_integer(prefix_str))
+    end
+  end
+
+  defp cidr_match?({a, b, c, d}, network_str, prefix_len) when prefix_len in 0..32 do
+    case :inet.parse_address(to_charlist(network_str)) do
+      {:ok, {na, nb, nc, nd}} ->
+        mask = (0xFFFFFFFF <<< (32 - prefix_len)) &&& 0xFFFFFFFF
+        peer_int = a * 0x1000000 + b * 0x10000 + c * 0x100 + d
+        net_int = na * 0x1000000 + nb * 0x10000 + nc * 0x100 + nd
+        (peer_int &&& mask) == (net_int &&& mask)
+
+      _ ->
+        false
+    end
+  end
+
+  defp cidr_match?(_, _, _), do: false
 
   defp minimal_ae_ack do
     msg = "MSH|^~\\&|Joy|||||||#{DateTime.utc_now() |> Calendar.strftime("%Y%m%d%H%M%S")}||ACK|#{generate_control_id()}|P|2.5\rMSA|AE|\r"

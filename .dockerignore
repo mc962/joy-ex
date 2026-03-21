@@ -1,0 +1,29 @@
+# .dockerignore for Joy
+# Keeps the build context small — only send what the Dockerfile actually COPYs.
+
+# Dependencies (fetched inside Docker)
+deps/
+_build/
+
+# Dev/test artifacts
+.elixir_ls/
+.vscode/
+priv/cert/
+cover/
+
+# Node modules (assets bundled inside Docker)
+assets/node_modules/
+
+# Mix artifacts
+*.ez
+
+# Git
+.git/
+.gitignore
+
+# Environment files (never bake secrets into the image)
+.env
+.env.*
+
+# Docs
+*.md

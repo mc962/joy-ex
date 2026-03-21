@@ -19,6 +19,7 @@ defmodule JoyWeb.DashboardLive do
      socket
      |> assign(:page_title, "Dashboard")
      |> assign(:channels, channels)
+     |> assign(:running_ids, running_ids(channels))
      |> assign(:channel_stats, channel_stats)
      |> assign(:recent_errors, recent_errors)}
   end
@@ -30,21 +31,13 @@ defmodule JoyWeb.DashboardLive do
   end
 
   def handle_info({event, _payload}, socket)
-      when event in [:channel_created, :channel_updated, :channel_deleted] do
+      when event in [:channel_created, :channel_deleted] do
     channels = Joy.Channels.list_channels()
-    {:noreply, assign(socket, :channels, channels)}
+    {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
   end
 
-  def handle_info({:channel_started, _id}, socket) do
-    channels = Joy.Channels.list_channels()
-    channel_stats = load_all_stats(channels)
-    {:noreply, assign(socket, channels: channels, channel_stats: channel_stats)}
-  end
-
-  def handle_info({:channel_stopped, _id}, socket) do
-    channels = Joy.Channels.list_channels()
-    channel_stats = load_all_stats(channels)
-    {:noreply, assign(socket, channels: channels, channel_stats: channel_stats)}
+  def handle_info({:channel_updated, _}, socket) do
+    {:noreply, assign(socket, :channels, Joy.Channels.list_channels())}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -55,8 +48,7 @@ defmodule JoyWeb.DashboardLive do
     channel = Joy.Channels.get_channel!(id)
     Joy.ChannelManager.start_channel(channel)
     Joy.Channels.set_started(channel, true)
-    channels = Joy.Channels.list_channels()
-    {:noreply, assign(socket, channels: channels, channel_stats: load_all_stats(channels))}
+    {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, id))}
   end
 
   def handle_event("stop_channel", %{"id" => id}, socket) do
@@ -64,8 +56,13 @@ defmodule JoyWeb.DashboardLive do
     channel = Joy.Channels.get_channel!(id)
     Joy.ChannelManager.stop_channel(id)
     Joy.Channels.set_started(channel, false)
-    channels = Joy.Channels.list_channels()
-    {:noreply, assign(socket, channels: channels, channel_stats: load_all_stats(channels))}
+    {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, id))}
+  end
+
+  defp running_ids(channels) do
+    channels
+    |> Enum.filter(&Joy.ChannelManager.channel_running?(&1.id))
+    |> MapSet.new(& &1.id)
   end
 
   defp load_all_stats(channels) do
@@ -99,7 +96,7 @@ defmodule JoyWeb.DashboardLive do
           <div class="card-body py-4 px-5">
             <p class="text-xs font-medium text-base-content/50 uppercase tracking-wider">Running</p>
             <p class="text-3xl font-bold text-success mt-1">
-              {Enum.count(@channels, &Joy.ChannelManager.channel_running?(&1.id))}
+              {MapSet.size(@running_ids)}
             </p>
           </div>
         </div>
@@ -131,56 +128,51 @@ defmodule JoyWeb.DashboardLive do
             </.link>
           </div>
         </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          <div :for={ch <- @channels} class="card bg-base-100 border border-base-300 hover:border-primary/30 transition-colors">
-            <div class="card-body p-5">
-              <div class="flex items-start justify-between gap-2">
-                <div class="min-w-0">
-                  <h3 class="font-semibold text-base-content truncate">{ch.name}</h3>
-                  <p class="text-xs text-base-content/50 mt-0.5">Port {ch.mllp_port}</p>
-                </div>
-                <div class="flex items-center gap-1.5 shrink-0">
-                  <span :if={Joy.ChannelManager.channel_running?(ch.id)}
-                        class="badge badge-success badge-sm gap-1">
-                    <span class="w-1.5 h-1.5 rounded-full bg-success-content animate-pulse"></span>
-                    Running
-                  </span>
-                  <span :if={!Joy.ChannelManager.channel_running?(ch.id)}
-                        class="badge badge-ghost badge-sm">Stopped</span>
-                </div>
-              </div>
-
-              <div class="flex gap-4 mt-3 text-xs text-base-content/60">
-                <span>
-                  <span class="font-medium text-success">{@channel_stats[ch.id][:processed_count] || 0}</span>
-                  processed
-                </span>
-                <span>
-                  <span class="font-medium text-error">{@channel_stats[ch.id][:failed_count] || 0}</span>
-                  failed
-                </span>
-              </div>
-
-              <div class="flex items-center gap-2 mt-4">
-                <button
-                  :if={!Joy.ChannelManager.channel_running?(ch.id)}
-                  phx-click="start_channel"
-                  phx-value-id={ch.id}
-                  class="btn btn-success btn-xs flex-1"
-                >
-                  Start
-                </button>
-                <button
-                  :if={Joy.ChannelManager.channel_running?(ch.id)}
-                  phx-click="stop_channel"
-                  phx-value-id={ch.id}
-                  class="btn btn-ghost btn-xs flex-1"
-                >
-                  Stop
-                </button>
-                <.link navigate={~p"/channels/#{ch.id}"} class="btn btn-ghost btn-xs">View</.link>
-              </div>
-            </div>
+        <div class="card bg-base-100 border border-base-300 overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="table table-sm">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Port</th>
+                  <th>Status</th>
+                  <th>Processed</th>
+                  <th>Failed</th>
+                  <th class="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={ch <- @channels} class="hover">
+                  <td>
+                    <div>
+                      <p class="font-medium">{ch.name}</p>
+                      <p :if={ch.description} class="text-xs text-base-content/50">{ch.description}</p>
+                    </div>
+                  </td>
+                  <td><span class="font-mono text-sm">{ch.mllp_port}</span></td>
+                  <td>
+                    <span :if={ch.id in @running_ids} class="badge badge-success badge-sm gap-1">
+                      <span class="w-1.5 h-1.5 rounded-full bg-success-content animate-pulse"></span>
+                      Running
+                    </span>
+                    <span :if={ch.id not in @running_ids} class="badge badge-ghost badge-sm">Stopped</span>
+                  </td>
+                  <td class="text-sm font-medium text-success">{@channel_stats[ch.id][:processed_count] || 0}</td>
+                  <td class="text-sm font-medium text-error">{@channel_stats[ch.id][:failed_count] || 0}</td>
+                  <td>
+                    <div class="flex items-center justify-end gap-1">
+                      <button :if={ch.id not in @running_ids}
+                              phx-click="start_channel" phx-value-id={ch.id}
+                              class="btn btn-ghost btn-xs text-success">Start</button>
+                      <button :if={ch.id in @running_ids}
+                              phx-click="stop_channel" phx-value-id={ch.id}
+                              class="btn btn-ghost btn-xs text-error">Stop</button>
+                      <.link navigate={~p"/channels/#{ch.id}"} class="btn btn-ghost btn-xs">View</.link>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

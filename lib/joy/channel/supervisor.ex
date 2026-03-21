@@ -44,5 +44,5 @@ defmodule Joy.Channel.Supervisor do
     Supervisor.init(children, strategy: :rest_for_one)
   end
 
-  defp via(channel_id), do: {:via, Registry, {Joy.ChannelRegistry, channel_id}}
+  defp via(channel_id), do: {:via, Horde.Registry, {Joy.ChannelRegistry, channel_id}}
 end

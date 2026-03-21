@@ -36,7 +36,7 @@ defmodule Joy.Channel.Pipeline do
 
   @doc "Dispatch a persisted log entry to this channel's pipeline for async processing."
   def process_async(channel_id, entry_id) do
-    case Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
       [{pid, _}] -> GenServer.cast(pid, {:process, entry_id})
       [] -> Logger.warning("[Pipeline] No pipeline for channel #{channel_id}")
     end
@@ -44,7 +44,7 @@ defmodule Joy.Channel.Pipeline do
 
   @doc "Get current throughput stats for the LiveView dashboard."
   def get_stats(channel_id) do
-    case Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
       [{pid, _}] -> GenServer.call(pid, :get_stats)
       [] -> default_stats()
     end
@@ -52,7 +52,7 @@ defmodule Joy.Channel.Pipeline do
 
   @doc "Reload channel config from DB (after user edits transforms/destinations)."
   def reload_config(channel_id) do
-    case Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
       [{pid, _}] -> GenServer.cast(pid, :reload_config)
       [] -> :ok
     end
@@ -140,7 +140,7 @@ defmodule Joy.Channel.Pipeline do
         Enum.filter(dest_configs, & &1.enabled)
       else
         route_names = Enum.map(msg.routes, &to_string/1)
-        Enum.filter(dest_configs, &(&1.enabled and to_string(&1.name) in route_names))
+        Enum.filter(dest_configs, &(&1.enabled and routing_key(&1) in route_names))
       end
 
     Enum.each(destinations, fn dest ->
@@ -171,5 +171,10 @@ defmodule Joy.Channel.Pipeline do
 
   defp default_stats, do: %{processed_count: 0, failed_count: 0, last_error: nil, last_message_at: nil}
 
-  defp via(channel_id), do: {:via, Registry, {Joy.ChannelRegistry, {:pipeline, channel_id}}}
+  # For sink destinations, the routing key is config["name"] (the sink bucket identifier).
+  # For all other adapters, it's the destination display name.
+  defp routing_key(%{adapter: "sink", config: config}), do: to_string((config || %{})["name"] || "")
+  defp routing_key(dest), do: to_string(dest.name)
+
+  defp via(channel_id), do: {:via, Horde.Registry, {Joy.ChannelRegistry, {:pipeline, channel_id}}}
 end

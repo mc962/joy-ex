@@ -63,6 +63,34 @@ if config_env() == :prod do
 
   config :joy, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # Stable bare-metal / homelab alternative: named nodes with libcluster Epmd.
+  # Use this instead of dns_cluster when your nodes have fixed identities and
+  # hostnames (e.g. dedicated servers or static EC2s with Route 53 records).
+  # Node names are human-readable in logs and `iex --remsh` is nicer to type.
+  #
+  # Steps to switch:
+  #   1. Add `{:libcluster, "~> 3.3"}` to mix.exs deps
+  #   2. Remove the DNSCluster child from application.ex (or leave it — it's harmless)
+  #   3. Add `{Cluster.Supervisor, [topologies, [name: Joy.ClusterSupervisor]]}` to application.ex
+  #   4. Set RELEASE_NODE in rel/env.sh.eex to a fixed name instead of the IP-based one, e.g.:
+  #        export RELEASE_NODE="joy@$(hostname -f)"   # uses the machine's FQDN
+  #
+  # Example for a 3-node homelab cluster at florence.place:
+  #
+  # topologies = [
+  #   joy: [
+  #     strategy: Cluster.Strategy.Epmd,
+  #     config: [
+  #       hosts: [
+  #         :"joy@joy-1.florence.place",
+  #         :"joy@joy-2.florence.place",
+  #         :"joy@joy-3.florence.place"
+  #       ]
+  #     ]
+  #   ]
+  # ]
+  # config :libcluster, topologies: topologies
+
   config :joy, JoyWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [

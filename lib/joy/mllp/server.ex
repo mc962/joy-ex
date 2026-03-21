@@ -66,6 +66,9 @@ defmodule Joy.MLLP.Server do
         case DynamicSupervisor.start_child(Joy.MLLP.ConnectionSupervisor, spec) do
           {:ok, pid} ->
             :gen_tcp.controlling_process(client, pid)
+          {:error, :normal} ->
+            # Connection was rejected cleanly (e.g. IP not in allowlist) — already logged and closed.
+            :ok
           {:error, reason} ->
             Logger.error("[MLLP.Server] Failed to start connection: #{inspect(reason)}")
             :gen_tcp.close(client)
@@ -82,5 +85,5 @@ defmodule Joy.MLLP.Server do
     end
   end
 
-  defp via(channel_id), do: {:via, Registry, {Joy.ChannelRegistry, {:mllp_server, channel_id}}}
+  defp via(channel_id), do: {:via, Horde.Registry, {Joy.ChannelRegistry, {:mllp_server, channel_id}}}
 end

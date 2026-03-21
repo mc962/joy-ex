@@ -1,0 +1,107 @@
+# docker-compose.yml — Three-node Joy cluster for local development and HA testing.
+#
+# All joy nodes share the "joy" Docker network alias, so dns_cluster resolves
+# "joy" → [joy1-IP, joy2-IP, joy3-IP] and connects the Erlang nodes automatically.
+#
+# Usage:
+#   1. Build the image:       docker compose build
+#   2. Run DB migrations:     docker compose run --rm joy1 bin/migrate
+#   3. Start the cluster:     docker compose up
+#
+# To test a two-node cluster, comment out the joy3 service block below.
+#
+# Web UI:
+#   Node 1: http://localhost:4000
+#   Node 2: http://localhost:4001   (same app, different node — shows Horde failover)
+#   Node 3: http://localhost:4002
+#
+# MLLP ports: expose per-channel MLLP ports from ALL nodes here.
+#   In production, an NLB health-checks each port on each node and only routes
+#   to the node where that channel is currently running (Horde ensures exactly one).
+#
+# Secrets: copy this block to a .env file and fill in real values.
+#   SECRET_KEY_BASE:  mix phx.gen.secret
+#   ENCRYPTION_KEY:   :crypto.strong_rand_bytes(32) |> Base.encode64() |> IO.puts  (in iex)
+#   RELEASE_COOKIE:   mix phx.gen.secret 32
+
+x-joy-env: &joy-env
+  DATABASE_URL: "ecto://joy:joy@postgres/joy_prod"
+  SECRET_KEY_BASE: "REPLACE_WITH_mix_phx_gen_secret_OUTPUT"
+  ENCRYPTION_KEY: "REPLACE_WITH_32_BYTE_BASE64_KEY="
+  RELEASE_COOKIE: "REPLACE_WITH_RANDOM_SECRET"
+  PHX_HOST: "localhost"
+  PHX_SERVER: "true"
+  # dns_cluster will resolve "joy" → both container IPs via Docker network aliases below
+  DNS_CLUSTER_QUERY: "joy"
+  # Pool size per node — total DB connections = POOL_SIZE × num_nodes
+  POOL_SIZE: "5"
+
+services:
+  joy1:
+    build: .
+    environment:
+      <<: *joy-env
+    ports:
+      - "4000:4000"      # Web UI for node 1
+      # Expose MLLP ports here as channels are added, e.g.:
+      # - "2575:2575"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      joy_net:
+        aliases:
+          - joy            # All nodes answer to "joy" DNS → multi-A record discovery
+
+  joy2:
+    build: .
+    environment:
+      <<: *joy-env
+    ports:
+      - "4001:4000"      # Web UI for node 2 (different host port)
+      # - "2576:2575"    # Same MLLP port on different host port for testing
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      joy_net:
+        aliases:
+          - joy            # All nodes answer to "joy" DNS → multi-A record discovery
+
+  # Comment out this block to test a two-node cluster instead.
+  joy3:
+    build: .
+    environment:
+      <<: *joy-env
+    ports:
+      - "4002:4000"      # Web UI for node 3 (different host port)
+      # - "2577:2575"    # Same MLLP port on different host port for testing
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      joy_net:
+        aliases:
+          - joy            # All nodes answer to "joy" DNS → multi-A record discovery
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: joy
+      POSTGRES_PASSWORD: joy
+      POSTGRES_DB: joy_prod
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U joy -d joy_prod"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - joy_net
+
+networks:
+  joy_net:
+
+volumes:
+  postgres_data:

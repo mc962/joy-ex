@@ -31,9 +31,9 @@ defmodule Joy.ChannelManager do
   @doc "Stop a running channel's OTP tree by id."
   def stop_channel(channel_id), do: GenServer.call(__MODULE__, {:stop_channel, channel_id})
 
-  @doc "Check if a channel's supervisor process is alive."
+  @doc "Check if a channel's supervisor process is alive (cluster-wide)."
   def channel_running?(channel_id) do
-    case Registry.lookup(Joy.ChannelRegistry, channel_id) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, channel_id) do
       [{_pid, _}] -> true
       [] -> false
     end
@@ -68,9 +68,9 @@ defmodule Joy.ChannelManager do
 
   @impl true
   def handle_call({:stop_channel, channel_id}, _from, state) do
-    case Registry.lookup(Joy.ChannelRegistry, channel_id) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, channel_id) do
       [{pid, _}] ->
-        DynamicSupervisor.terminate_child(Joy.ChannelSupervisor, pid)
+        Horde.DynamicSupervisor.terminate_child(Joy.ChannelSupervisor, pid)
         Phoenix.PubSub.broadcast(Joy.PubSub, "channels", {:channel_stopped, channel_id})
         {:reply, :ok, state}
       [] ->
@@ -78,11 +78,17 @@ defmodule Joy.ChannelManager do
     end
   end
 
-  defp do_start_channel(channel) do
-    case DynamicSupervisor.start_child(Joy.ChannelSupervisor, {Joy.Channel.Supervisor, channel}) do
+  defp do_start_channel(%{id: id} = _channel) do
+    channel = Joy.Channels.get_channel!(id)
+    case Horde.DynamicSupervisor.start_child(Joy.ChannelSupervisor, {Joy.Channel.Supervisor, channel}) do
       {:ok, _pid} = ok ->
         Logger.info("[ChannelManager] Started channel #{channel.id} (#{channel.name}) on :#{channel.mllp_port}")
         ok
+      {:error, {:already_started, _pid}} ->
+        # Another node in the cluster already started this channel — this is normal
+        # when multiple nodes boot simultaneously and each tries to start all channels.
+        Logger.debug("[ChannelManager] Channel #{channel.id} already running in cluster, skipping")
+        :ok
       {:error, reason} = err ->
         Logger.error("[ChannelManager] Failed to start channel #{channel.id}: #{inspect(reason)}")
         err

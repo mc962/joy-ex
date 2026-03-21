@@ -36,7 +36,8 @@ defmodule JoyWeb.Channels.ShowLive do
      |> assign(:dest_form, nil)
      |> assign(:editing_transform, nil)
      |> assign(:editing_dest, nil)
-     |> assign(:selected_adapter, "http_webhook")}
+     |> assign(:selected_adapter, "http_webhook")
+     |> assign(:ip_error, nil)}
   end
 
   @impl true
@@ -117,7 +118,7 @@ defmodule JoyWeb.Channels.ShowLive do
     result = Channels.upsert_transform_step(socket.assigns.channel.id, params)
     case result do
       {:ok, _} ->
-        if socket.assigns.running?, do: Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+        Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
         channel = Channels.get_channel!(socket.assigns.channel.id)
         {:noreply,
          socket
@@ -132,7 +133,7 @@ defmodule JoyWeb.Channels.ShowLive do
   def handle_event("delete_transform", %{"id" => id}, socket) do
     step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
     if step, do: Channels.delete_transform_step(step)
-    if socket.assigns.running?, do: Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
     channel = Channels.get_channel!(socket.assigns.channel.id)
     {:noreply, assign(socket, :channel, channel)}
   end
@@ -141,8 +142,8 @@ defmodule JoyWeb.Channels.ShowLive do
     step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
     if step do
       Channels.upsert_transform_step(socket.assigns.channel.id, %{"id" => step.id, "enabled" => !step.enabled})
-      if socket.assigns.running?, do: Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
     end
+    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
     channel = Channels.get_channel!(socket.assigns.channel.id)
     {:noreply, assign(socket, :channel, channel)}
   end
@@ -151,7 +152,7 @@ defmodule JoyWeb.Channels.ShowLive do
     result = Channels.upsert_destination_config(socket.assigns.channel.id, params)
     case result do
       {:ok, _} ->
-        if socket.assigns.running?, do: Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+        Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
         channel = Channels.get_channel!(socket.assigns.channel.id)
         {:noreply,
          socket
@@ -166,9 +167,29 @@ defmodule JoyWeb.Channels.ShowLive do
   def handle_event("delete_destination", %{"id" => id}, socket) do
     dest = Enum.find(socket.assigns.channel.destination_configs, &(to_string(&1.id) == id))
     if dest, do: Channels.delete_destination_config(dest)
-    if socket.assigns.running?, do: Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
     channel = Channels.get_channel!(socket.assigns.channel.id)
     {:noreply, assign(socket, :channel, channel)}
+  end
+
+  def handle_event("add_allowed_ip", %{"ip" => raw_ip}, socket) do
+    ip = String.trim(raw_ip)
+    channel = socket.assigns.channel
+
+    case Channels.update_channel(channel, %{allowed_ips: channel.allowed_ips ++ [ip]}) do
+      {:ok, updated} ->
+        {:noreply, socket |> assign(:channel, updated) |> assign(:ip_error, nil)}
+
+      {:error, changeset} ->
+        {msg, _} = changeset.errors[:allowed_ips]
+        {:noreply, assign(socket, :ip_error, msg)}
+    end
+  end
+
+  def handle_event("remove_allowed_ip", %{"ip" => ip}, socket) do
+    channel = socket.assigns.channel
+    {:ok, updated} = Channels.update_channel(channel, %{allowed_ips: List.delete(channel.allowed_ips, ip)})
+    {:noreply, assign(socket, :channel, updated)}
   end
 
   def handle_event("toggle_destination", %{"id" => id}, socket) do
@@ -177,6 +198,7 @@ defmodule JoyWeb.Channels.ShowLive do
       Channels.upsert_destination_config(socket.assigns.channel.id,
         %{"id" => dest.id, "enabled" => !dest.enabled})
     end
+    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
     channel = Channels.get_channel!(socket.assigns.channel.id)
     {:noreply, assign(socket, :channel, channel)}
   end
@@ -282,15 +304,13 @@ defmodule JoyWeb.Channels.ShowLive do
             <div :for={dest <- @channel.destination_configs}
                  class="flex items-center gap-3 p-3 rounded-lg border border-base-300 bg-base-200/50">
               <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2">
-                  <p class="font-medium text-sm">{dest.name}</p>
-                  <span class="badge badge-outline badge-xs">{@adapter_labels[dest.adapter] || dest.adapter}</span>
-                </div>
+                <p class="font-medium text-sm">{dest.name}</p>
                 <p class="text-xs text-base-content/40 mt-0.5">
                   Retry {dest.retry_attempts}× at {dest.retry_base_ms}ms base
                 </p>
               </div>
               <div class="flex items-center gap-1 shrink-0">
+                <span class="badge badge-outline badge-xs mr-1">{@adapter_labels[dest.adapter] || dest.adapter}</span>
                 <button phx-click="toggle_destination" phx-value-id={dest.id}
                         class={"btn btn-xs #{if dest.enabled, do: "btn-ghost", else: "btn-warning"}"}>
                   {if dest.enabled, do: "Disable", else: "Enable"}
@@ -306,6 +326,42 @@ defmodule JoyWeb.Channels.ShowLive do
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <%!-- IP Allowlist --%>
+    <div class="card bg-base-100 border border-base-300">
+      <div class="card-body p-5">
+        <h3 class="font-semibold mb-1">IP Allowlist</h3>
+        <p class="text-sm text-base-content/50 mb-4">
+          Restrict inbound MLLP connections to specific addresses. Accepts plain IPs
+          (<code class="font-mono">10.0.0.5</code>) or CIDR ranges
+          (<code class="font-mono">10.0.0.0/24</code>). Empty = accept from any IP.
+          Changes apply to new connections immediately; existing connections are unaffected.
+        </p>
+
+        <div :if={@channel.allowed_ips == []} class="text-sm text-base-content/40 py-1 mb-3">
+          No restrictions — accepting connections from any IP.
+        </div>
+
+        <div :if={@channel.allowed_ips != []} class="space-y-1 mb-4">
+          <div :for={ip <- @channel.allowed_ips} class="flex items-center gap-2">
+            <span class="font-mono text-sm flex-1">{ip}</span>
+            <button phx-click="remove_allowed_ip" phx-value-ip={ip}
+                    class="btn btn-ghost btn-xs text-error">
+              <.icon name="hero-x-mark" class="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        <form phx-submit="add_allowed_ip" class="flex gap-2">
+          <input type="text" name="ip" class="input input-bordered input-sm flex-1"
+                 placeholder="192.168.1.0/24 or 10.0.0.5" />
+          <button type="submit" class="btn btn-sm btn-ghost">
+            <.icon name="hero-plus" class="w-4 h-4" /> Add
+          </button>
+        </form>
+        <p :if={@ip_error} class="text-error text-xs mt-1">{@ip_error}</p>
       </div>
     </div>
 
@@ -362,69 +418,70 @@ defmodule JoyWeb.Channels.ShowLive do
           </div>
 
           <%!-- AWS SNS fields --%>
+          <% cfg = @dest_form[:config].value || %{} %>
           <div :if={@selected_adapter == "aws_sns"} class="space-y-3">
             <input type="text" class="input input-bordered w-full" placeholder="Topic ARN"
-                   name="destination_config[config][topic_arn]" />
+                   name="destination_config[config][topic_arn]" value={cfg["topic_arn"]} />
             <input type="text" class="input input-bordered w-full" placeholder="AWS Region (e.g. us-east-1)"
-                   name="destination_config[config][aws_region]" />
+                   name="destination_config[config][aws_region]" value={cfg["aws_region"]} />
             <input type="text" class="input input-bordered w-full" placeholder="Access Key ID (optional — use IAM roles instead)"
-                   name="destination_config[config][aws_access_key_id]" />
+                   name="destination_config[config][aws_access_key_id]" value={cfg["aws_access_key_id"]} />
             <input type="password" class="input input-bordered w-full" placeholder="Secret Access Key (optional)"
-                   name="destination_config[config][aws_secret_access_key]" />
+                   name="destination_config[config][aws_secret_access_key]" value={cfg["aws_secret_access_key"]} />
           </div>
 
           <%!-- AWS SQS fields --%>
           <div :if={@selected_adapter == "aws_sqs"} class="space-y-3">
             <input type="text" class="input input-bordered w-full" placeholder="Queue URL"
-                   name="destination_config[config][queue_url]" />
+                   name="destination_config[config][queue_url]" value={cfg["queue_url"]} />
             <input type="text" class="input input-bordered w-full" placeholder="AWS Region"
-                   name="destination_config[config][aws_region]" />
+                   name="destination_config[config][aws_region]" value={cfg["aws_region"]} />
             <input type="text" class="input input-bordered w-full" placeholder="Access Key ID (optional)"
-                   name="destination_config[config][aws_access_key_id]" />
+                   name="destination_config[config][aws_access_key_id]" value={cfg["aws_access_key_id"]} />
             <input type="password" class="input input-bordered w-full" placeholder="Secret Access Key (optional)"
-                   name="destination_config[config][aws_secret_access_key]" />
+                   name="destination_config[config][aws_secret_access_key]" value={cfg["aws_secret_access_key"]} />
           </div>
 
           <%!-- HTTP Webhook fields --%>
           <div :if={@selected_adapter == "http_webhook"} class="space-y-3">
             <input type="text" class="input input-bordered w-full" placeholder="URL"
-                   name="destination_config[config][url]" />
+                   name="destination_config[config][url]" value={cfg["url"]} />
             <textarea class="textarea textarea-bordered w-full font-mono text-xs h-20"
                       placeholder={"Authorization: Bearer token\nX-Custom-Header: value"}
-                      name="destination_config[config][headers_raw]"></textarea>
+                      name="destination_config[config][headers_raw]">{cfg["headers_raw"]}</textarea>
             <input type="number" class="input input-bordered w-full" placeholder="Timeout ms (default 10000)"
-                   name="destination_config[config][timeout_ms]" />
+                   name="destination_config[config][timeout_ms]" value={cfg["timeout_ms"]} />
           </div>
 
           <%!-- MLLP Forward fields --%>
           <div :if={@selected_adapter == "mllp_forward"} class="space-y-3">
             <input type="text" class="input input-bordered w-full" placeholder="Host"
-                   name="destination_config[config][host]" />
+                   name="destination_config[config][host]" value={cfg["host"]} />
             <input type="number" class="input input-bordered w-full" placeholder="Port"
-                   name="destination_config[config][port]" />
+                   name="destination_config[config][port]" value={cfg["port"]} />
             <input type="number" class="input input-bordered w-full" placeholder="Timeout ms (default 10000)"
-                   name="destination_config[config][timeout_ms]" />
+                   name="destination_config[config][timeout_ms]" value={cfg["timeout_ms"]} />
           </div>
 
           <%!-- Redis Queue fields --%>
           <div :if={@selected_adapter == "redis_queue"} class="space-y-3">
             <input type="text" class="input input-bordered w-full" placeholder="Redis URL (e.g. redis://localhost:6379)"
-                   name="destination_config[config][redis_url]" />
+                   name="destination_config[config][redis_url]" value={cfg["redis_url"]} />
             <input type="text" class="input input-bordered w-full" placeholder="Key name"
-                   name="destination_config[config][key]" />
+                   name="destination_config[config][key]" value={cfg["key"]} />
             <select class="select select-bordered w-full" name="destination_config[config][type]">
-              <option value="list">List (LPUSH)</option>
-              <option value="stream">Stream (XADD)</option>
+              <option value="list" selected={cfg["type"] == "list"}>List (LPUSH)</option>
+              <option value="stream" selected={cfg["type"] == "stream"}>Stream (XADD)</option>
             </select>
           </div>
 
           <%!-- File fields --%>
           <div :if={@selected_adapter == "file"} class="space-y-3">
             <input type="text" class="input input-bordered w-full" placeholder="File path (e.g. /var/log/hl7/audit.log)"
-                   name="destination_config[config][path]" />
+                   name="destination_config[config][path]" value={cfg["path"]} />
             <select class="select select-bordered w-full" name="destination_config[config][format]">
-              <option value="raw">Raw HL7</option>
-              <option value="json">JSON</option>
+              <option value="raw" selected={cfg["format"] != "json"}>Raw HL7</option>
+              <option value="json" selected={cfg["format"] == "json"}>JSON</option>
             </select>
           </div>
 
@@ -435,7 +492,7 @@ defmodule JoyWeb.Channels.ShowLive do
               <.link navigate={~p"/tools/sinks"} class="link">Tools → Message Sinks</.link>.
             </p>
             <input type="text" class="input input-bordered w-full" placeholder="Sink name (e.g. audit, lab_feed)"
-                   name="destination_config[config][name]" />
+                   name="destination_config[config][name]" value={cfg["name"]} />
           </div>
 
           <div class="grid grid-cols-2 gap-3">

@@ -95,10 +95,18 @@ defmodule JoyWeb.Channels.IndexLive do
   end
 
   @impl true
-  def handle_info({event, _}, socket) when event in [:channel_created, :channel_updated, :channel_deleted, :channel_started, :channel_stopped] do
+  # Structural changes (create/delete) need a full refresh including running_ids.
+  def handle_info({event, _}, socket) when event in [:channel_created, :channel_deleted] do
     channels = Channels.list_channels()
     {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
   end
+
+  # Config updates refresh channel data but must not overwrite the optimistic running_ids
+  # set by start_channel/stop_channel — channel_running? may not reflect reality yet.
+  def handle_info({:channel_updated, _}, socket) do
+    {:noreply, assign(socket, :channels, Channels.list_channels())}
+  end
+
   def handle_info(_, socket), do: {:noreply, socket}
 
   @impl true

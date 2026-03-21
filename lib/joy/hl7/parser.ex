@@ -74,6 +74,9 @@ defmodule Joy.HL7.Parser do
   defp parse_segment(line, field_sep) do
     fields = String.split(line, field_sep)
     name = fields |> List.first("") |> String.slice(0, 3) |> String.trim()
+    # MSH.1 is the field separator character itself — it doesn't appear in the
+    # split result. Insert it so fields[N] == MSH.N, consistent with all other segments.
+    fields = if name == "MSH", do: List.insert_at(fields, 1, field_sep), else: fields
     %{name: name, fields: fields}
   end
 end

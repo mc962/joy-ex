@@ -1,0 +1,14 @@
+## rel/vm.args.eex — Erlang VM arguments for the Joy release.
+
+## Use long names (required when node names include an IP address).
+-name <%= @release.name %>@127.0.0.1
+
+## Pin Erlang distribution to a fixed port range.
+## Open these in your firewall / security group rules (in addition to epmd :4369).
+## All nodes in the cluster must be able to reach each other on these ports.
+-kernel inet_dist_listen_min 9100
+-kernel inet_dist_listen_max 9200
+
+## Heartbeat interval for Erlang distribution (ms). Default 60000.
+## Lower this to detect dead nodes faster at the cost of slightly more traffic.
+-kernel net_ticktime 30

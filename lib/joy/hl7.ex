@@ -25,15 +25,10 @@ defmodule Joy.HL7 do
     segments
     |> Enum.map(fn %{name: name, fields: fields} ->
       if name == "MSH" do
-        # MSH is special: MSH.1 = field_sep, MSH.2 = encoding chars
-        # fields[0]="MSH", fields[1]=field_sep, fields[2]=enc_chars, fields[3..n]=normal
+        # fields layout: [0]="MSH", [1]=field_sep (MSH.1), [2]=enc_chars (MSH.2), [3..n]=MSH.3+
+        # Reconstruct from the struct's delimiter fields so any edits to them are preserved.
         enc_chars = cs <> rs <> ec <> ss
-        msh_fields = [
-          "MSH",
-          # field 2 onwards separated by field_sep — but MSH.1 is the sep itself
-          enc_chars | Enum.drop(fields, 2)
-        ]
-        "MSH" <> fs <> Enum.join(Enum.drop(msh_fields, 1), fs)
+        Enum.join(["MSH", enc_chars | Enum.drop(fields, 3)], fs)
       else
         Enum.join(fields, fs)
       end
