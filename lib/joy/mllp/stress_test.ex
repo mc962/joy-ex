@@ -183,7 +183,7 @@ defmodule Joy.MLLP.StressTest do
     {sodium, potassium, glucose, creatinine}
   end
 
-  defp abnormal_flag(val, low, high) when val < low, do: "L"
+  defp abnormal_flag(val, low, _high) when val < low, do: "L"
   defp abnormal_flag(val, _low, high) when val > high, do: "H"
   defp abnormal_flag(_, _, _), do: ""
 
