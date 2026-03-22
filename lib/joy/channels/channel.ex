@@ -31,6 +31,14 @@ defmodule Joy.Channels.Channel do
     # Pause/Resume (item 4)
     field :paused, :boolean, default: false
 
+    # Dispatch concurrency (item 11)
+    # Controls how many messages a channel may process simultaneously.
+    # 1 = strict serial (default) — ordered, simplest, never double-delivers.
+    # N > 1 = up to N messages in-flight at once — higher throughput under concurrent
+    # MLLP senders, but cross-sender delivery order is not guaranteed.
+    # The GenServer mailbox remains the backpressure point; no explicit queue is needed.
+    field :dispatch_concurrency, :integer, default: 1
+
     # MLLP TLS (item 1) — PEM content stored in DB, not file paths
     field :tls_enabled, :boolean, default: false
     field :tls_cert_pem, :string
@@ -59,6 +67,7 @@ defmodule Joy.Channels.Channel do
     channel
     |> cast(attrs, [
       :name, :description, :mllp_port, :started, :allowed_ips, :paused,
+      :dispatch_concurrency,
       :tls_enabled, :tls_cert_pem, :tls_key_pem, :tls_ca_cert_pem,
       :tls_cert_expires_at, :tls_verify_peer,
       :alert_enabled, :alert_threshold, :alert_email, :alert_webhook_url,
@@ -68,6 +77,7 @@ defmodule Joy.Channels.Channel do
     |> validate_length(:name, min: 2, max: 100)
     |> validate_number(:mllp_port, greater_than_or_equal_to: 1024, less_than_or_equal_to: 65535)
     |> unique_constraint(:mllp_port, message: "is already in use by another channel")
+    |> validate_number(:dispatch_concurrency, greater_than_or_equal_to: 1, less_than_or_equal_to: 20)
     |> Joy.IPValidator.validate_allowed_ips()
     |> validate_tls()
     |> validate_number(:alert_threshold, greater_than: 0)

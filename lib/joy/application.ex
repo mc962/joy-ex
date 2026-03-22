@@ -10,7 +10,7 @@ defmodule Joy.Application do
     Phoenix.PubSub            — real-time pub/sub for LiveView dashboard updates (pg adapter, cluster-aware)
     Joy.ChannelRegistry       — Horde.Registry: distributed registry of channel supervisor + pipeline PIDs
     Joy.TransformSupervisor   — Task.Supervisor for sandboxed transform script evaluation (node-local)
-    Joy.MLLP.ConnectionSup    — DynamicSupervisor for all active MLLP TCP connections (node-local)
+    Joy.ChannelSupervisor     — Horde.DynamicSupervisor: distributes per-channel OTP trees across cluster
     Joy.ChannelSupervisor     — Horde.DynamicSupervisor: distributes per-channel OTP trees across cluster
     Joy.ChannelManager        — GenServer: starts channels on boot, manages runtime lifecycle
     JoyWeb.Endpoint           — Phoenix HTTP/WebSocket endpoint (last, after all infrastructure)
@@ -66,10 +66,6 @@ defmodule Joy.Application do
       # In-memory message sink for testing destinations. Capped ring buffer per
       # named sink; messages are inspectable via the Sinks UI at /tools/sinks.
       Joy.Sinks,
-
-      # All MLLP TCP connection handlers live here, globally.
-      # Node-local intentionally: TCP connections are inherently node-local.
-      {DynamicSupervisor, name: Joy.MLLP.ConnectionSupervisor, strategy: :one_for_one},
 
       # Distributed dynamic supervisor for per-channel OTP trees.
       # Horde distributes channel supervisor trees across cluster nodes and

@@ -6,8 +6,8 @@ This document covers specific implementation decisions in Joy: why something was
 
 - [MLLP Framing and Leniency](#mllp-framing-and-leniency)
 - [TCP Connection Model](#tcp-connection-model)
-- [MLLP TLS: Transport Abstraction](#mllp-tls-transport-abstraction)
-- [Pipeline Serialization](#pipeline-serialization)
+- [MLLP TLS and ThousandIsland](#mllp-tls-and-thousandisland)
+- [Pipeline Dispatch and Concurrency](#pipeline-dispatch-and-concurrency)
 - [Channel Pause/Resume](#channel-pauseresume)
 - [At-Least-Once Delivery: Full Details](#at-least-once-delivery-full-details)
 - [Registry Key Design](#registry-key-design)
@@ -68,16 +68,15 @@ On `:invalid_frame`, the entire buffer is discarded and a warning is logged. Thi
 
 ## TCP Connection Model
 
-### Why connections are not inside the channel OTP tree
+### Why connections are managed by ThousandIsland, not the channel OTP tree
 
-`Joy.MLLP.ConnectionSupervisor` is a global `DynamicSupervisor` at the top level of the application, not inside each channel's per-channel supervisor. This is intentional:
+`Joy.MLLP.Connection` is a `ThousandIsland.Handler`, not a GenServer. ThousandIsland manages one handler process per accepted connection internally and terminates it cleanly when the connection closes. There is no application-level `ConnectionSupervisor`.
 
-- Connection crashes do not cascade to the channel supervisor. If a connection GenServer crashes (malformed data, client misbehavior, etc.), the channel keeps running.
-- The ConnectionSupervisor does not need to be distributed via Horde. TCP connections are inherently local to the machine that accepted them — there is nothing meaningful to migrate when a connection process dies. When a node fails, the OS closes its TCP sockets and the sender reconnects.
+This is correct for the same reason as before: connection crashes must not cascade to the channel supervisor, and TCP connections are inherently local to the machine that accepted them — there is nothing meaningful to distribute or restart. When a node fails, the OS closes its TCP sockets and senders reconnect.
 
-### `:temporary` restart strategy
+### `:temporary` by nature
 
-`MLLP.Connection` has `restart: :temporary`. OTP will not restart it after a crash. This is correct: a reconnected client starts a new connection process; restarting an old connection process that already had a closed socket would just fail again. There is no state worth preserving in a connection process — the at-least-once guarantee lives in the database, not in the connection.
+ThousandIsland handler processes are not restarted after a crash. A reconnected client starts a fresh handler. There is no state worth preserving in a connection process — the at-least-once guarantee lives in the database.
 
 ### Active mode TCP
 
@@ -85,34 +84,39 @@ The connection uses `:inet.setopts(socket, active: true)`, which means TCP data 
 
 ---
 
-## MLLP TLS: Transport Abstraction
+## MLLP TLS and ThousandIsland
 
-### Why not Ranch or a TLS proxy?
+### Why ThousandIsland instead of raw `:ssl`
 
-The ROADMAP mentioned Ranch as a possible approach. Ranch was not used because the existing MLLP server already used raw `:gen_tcp` directly, and introducing Ranch would have required restructuring the accept loop substantially. Instead, TLS is layered in by carrying a **transport atom** (`:gen_tcp` or `:ssl`) through the server/connection boundary and dispatching all socket operations through it.
-
-### The transport atom pattern
-
-`Joy.MLLP.Server` checks `channel.tls_enabled` in `init/1` and calls either `:gen_tcp.listen/2` or `:ssl.listen/2`. For TLS, the accept loop has two phases:
+The original MLLP server used a hand-rolled accept loop with a single acceptor process. For TLS, this meant one handshake at a time:
 
 ```elixir
-{:ok, socket} = :ssl.transport_accept(listen_socket)  # wait for TCP connection
-{:ok, tls_socket} = :ssl.handshake(socket)             # upgrade to TLS
+:ssl.transport_accept(listen_socket)  # blocks until TCP connection arrives
+:ssl.handshake(socket)                # blocks for full TLS handshake (~5–20ms)
+# only now can we accept the next connection
 ```
 
-The transport atom and the live socket are passed together to `Joy.MLLP.Connection.start_link/1`. The Connection carries the transport in its state and uses it for every socket operation:
+Under burst load (many simultaneous connection attempts), connections queued in the OS backlog would time out waiting for the single acceptor to finish each handshake in turn. Stress testing with 100 concurrent TLS clients caused ~10% connection failures.
+
+ThousandIsland runs `num_acceptors: 100` processes against the same listen socket. Each acceptor independently calls `transport_accept` → `handshake` → hand off to handler. The OS round-robins incoming connections across whichever acceptors are idle, so up to 100 TLS handshakes proceed in parallel. Under the same stress test: zero failures.
+
+ThousandIsland is already a transitive dependency (via Bandit, the Phoenix web server), so using it directly adds no new packages.
+
+### Transport abstraction
+
+`Joy.MLLP.Server` delegates entirely to ThousandIsland:
 
 ```elixir
-# set active mode
-:gen_tcp.setopts(socket, active: true)   # plain TCP
-:ssl.setopts(socket, active: true)       # TLS
-
-# send
-:gen_tcp.send(socket, data)
-:ssl.send(socket, data)
+ThousandIsland.start_link(
+  port: channel.mllp_port,
+  handler_module: Joy.MLLP.Connection,
+  handler_options: %{channel_id: channel.id},
+  transport_module: ThousandIsland.Transports.SSL,   # or TCP
+  transport_options: [cert: cert_der, key: {type, der}, ...]
+)
 ```
 
-Active-mode messages differ by transport — `:tcp` tuple vs `:ssl` tuple — so the Connection has separate `handle_info` clauses for each.
+`Joy.MLLP.Connection` uses `ThousandIsland.Socket.send/2` and `ThousandIsland.Socket.peername/1`, which work identically for TCP and TLS. There is no transport atom threaded through the code — ThousandIsland handles the dispatch internally.
 
 ### PEM stored in DB, not file paths
 
@@ -137,13 +141,35 @@ TLS options are baked into the listening socket at `listen/2` time. Changing cer
 
 ---
 
-## Pipeline Serialization
+## Pipeline Dispatch and Concurrency
 
-Each channel's Pipeline GenServer processes one message at a time, sequentially. This is a deliberate match with MLLP's own flow control: MLLP senders wait for an ACK before sending the next message. A sender on a single connection is already serialized at the protocol level. Multiple concurrent connections to the same channel each get their own Connection process, but all dispatch to the same Pipeline via `GenServer.cast`. The Pipeline mailbox queues these and processes them in arrival order.
+### Non-blocking dispatch via worker tasks
 
-**Why not a pool of Pipeline workers?** The gains would be marginal. Each channel's MLLP port accepts connections from upstream systems that themselves serialize sends. Parallelism within a channel would primarily help when a destination is slow (e.g., an HTTP webhook timing out), but destinations run synchronously in the Pipeline — a slow destination blocks the Pipeline. This is another known gap: see [Known Gaps](#known-gaps).
+The Pipeline GenServer never blocks on I/O. Every message is executed inside a `Task.Supervisor.start_child` task under `Joy.Channel.WorkerSupervisor`. The GenServer only manages the dispatch queue:
 
-The pipeline re-fetches each message entry from the database by ID (`Joy.MessageLog.get_entry!/1`) rather than using the original message struct dispatched by the Connection. This ensures correctness during crash recovery: the requeued messages on startup also go through the same fetch path.
+1. Incoming `cast({:process, entry_id})` — if a slot is free, spawn a task and increment `in_flight`; otherwise enqueue in a local FIFO queue in state.
+2. Task completes and sends `{:dispatch_done, result}` — GenServer receives it, updates counters, decrements `in_flight`, drains one entry from the queue if any.
+
+This means slow destinations (long HTTP timeouts, sluggish MLLP targets) do not block the Pipeline from accepting new work. The GenServer itself stays responsive — it processes `cast` messages in microseconds.
+
+### Configurable concurrency
+
+`dispatch_concurrency` (per-channel DB field, default 1, max 20) controls how many tasks may run simultaneously:
+
+- **1** — strict serial. Message B's task is not spawned until message A's task sends `:dispatch_done`. Delivery order matches receive order. Correct for any system that requires sequencing.
+- **N > 1** — up to N tasks in flight. Higher throughput when many MLLP senders connect simultaneously and the destination is slow. Trade-off: ordering is not guaranteed across concurrent senders. Within a single MLLP connection, the ACK-before-next protocol serializes sends at the source, so per-connection ordering is always preserved.
+
+### Why the GenServer manages the queue, not the Task.Supervisor
+
+`Task.Supervisor` has no max-concurrency concept — it starts every task immediately. If we spawned a task per incoming message unconditionally, a burst of 1000 messages would create 1000 tasks simultaneously. Instead, the Pipeline holds a local `:queue` in state and uses `in_flight` to enforce the concurrency limit. The GenServer mailbox provides outer backpressure: new casts queue in the mailbox if the GenServer is busy draining `:dispatch_done` messages.
+
+### Crash recovery with in-flight tasks
+
+Worker tasks are started with `start_child` (no link to the Pipeline). If the Pipeline crashes mid-task, the task finishes and sends `{:dispatch_done, ...}` to the old (dead) pid — silently dropped. The new Pipeline instance requeues all `:pending` entries from the DB on startup, which includes any entry whose task was mid-execution. This is the same at-least-once behaviour as before; concurrency does not change the delivery guarantee.
+
+### DB re-fetch in the task
+
+Each task re-fetches its entry from the database by ID (`Joy.MessageLog.get_entry!/1`) rather than using a struct passed from the Connection. This ensures the crash-recovery path (requeued entries on startup) is identical to the normal path.
 
 ---
 
@@ -677,8 +703,6 @@ The query always includes `e.status != 'pending'`, regardless of whether `all: t
 ## Known Gaps
 
 These are documented limitations in the current design that are worth knowing about.
-
-**Pipeline blocks on slow destinations:** Retrying a slow destination blocks the Pipeline GenServer for the duration. High-latency destinations reduce channel throughput. Mitigations: use asynchronous destinations (SQS, SNS, Redis), keep `retry_attempts` low, or move to a pool-based pipeline model (see Roadmap item 11).
 
 **No channel pinning:** Horde distributes channels across nodes using a consistent hash ring. There is no mechanism to pin a channel to a specific node. This matters if you want to colocate specific channels for network proximity reasons, or if you want to control which node runs a channel during a rolling upgrade (see Roadmap item 15).
 

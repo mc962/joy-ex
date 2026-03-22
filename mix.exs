@@ -67,6 +67,7 @@ defmodule Joy.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
+      {:thousand_island, "~> 1.0"},
       {:ecto_psql_extras, "~> 0.6"},
       # AWS destination adapters + log archival
       {:ex_aws, "~> 2.5"},

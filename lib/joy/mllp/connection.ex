@@ -1,120 +1,82 @@
 defmodule Joy.MLLP.Connection do
   @moduledoc """
-  Handles a single MLLP TCP (or TLS) client connection.
+  Handles a single MLLP TCP (or TLS) client connection via ThousandIsland.Handler.
 
   Message flow (guaranteeing at-least-once delivery):
-    1. Receive TCP/SSL data, buffer partial frames
-    2. Extract complete MLLP frames via Joy.MLLP.Framer.unwrap/1
+    1. Receive data via handle_data/3 callback (ThousandIsland manages the recv loop)
+    2. Buffer and extract complete MLLP frames via Joy.MLLP.Framer.unwrap/1
     3. Parse HL7 with Joy.HL7.Parser
     4. Persist to message_log as :pending BEFORE ACKing
-    5. Send ACK (AA on success, AE on error)
+    5. Send ACK (AA on success, AE on error) via ThousandIsland.Socket.send/2
     6. Dispatch to Joy.Channel.Pipeline async
 
-  Transport abstraction:
-    - gen_tcp: messages arrive as {:tcp, socket, data}, {:tcp_closed, _}, {:tcp_error, _, _}
-    - ssl: messages arrive as {:ssl, socket, data}, {:ssl_closed, _}, {:ssl_error, _, _}
-    - active mode is set via :inet.setopts (gen_tcp) or :ssl.setopts (ssl)
+  ThousandIsland abstracts TCP vs TLS — ThousandIsland.Socket.send/2 and
+  ThousandIsland.Socket.peername/1 work identically for both transports.
 
   Why persist before ACKing: if we crash after persisting but before processing,
   the pipeline requeues on restart. If we crash before persisting, the sender
   retries (no ACK = retry). This guarantees no message is silently dropped.
 
-  restart: :temporary — connections are transient, not worth restarting after disconnect.
-
   # GO-TRANSLATION:
   # goroutine per connection reading from net.Conn synchronously.
-  # TCP active mode (messages arrive as process messages) has no Go equivalent —
-  # Go reads with conn.Read() in a loop. Conceptually identical, syntactically different.
+  # ThousandIsland.Handler callbacks replace the Go read loop.
   """
 
-  use GenServer
+  use ThousandIsland.Handler
   import Bitwise
   require Logger
 
-  def start_link({channel_id, socket, transport}) do
-    GenServer.start_link(__MODULE__, {channel_id, socket, transport})
-  end
-
-  def child_spec({channel_id, socket, transport}) do
-    %{
-      id: {__MODULE__, :erlang.unique_integer()},
-      start: {__MODULE__, :start_link, [{channel_id, socket, transport}]},
-      restart: :temporary,
-      type: :worker
-    }
-  end
-
-  @impl true
-  def init({channel_id, socket, transport}) do
+  @impl ThousandIsland.Handler
+  def handle_connection(socket, %{channel_id: channel_id} = state) do
     channel =
       Joy.Repo.get!(Joy.Channels.Channel, channel_id)
       |> Joy.Repo.preload(:organization)
 
-    case check_peer_ip(socket, Joy.Channels.effective_allowed_ips(channel), transport) do
+    case check_peer_ip(socket, Joy.Channels.effective_allowed_ips(channel)) do
       :ok ->
-        set_active(socket, transport)
-        {:ok, %{channel_id: channel_id, socket: socket, buffer: "", transport: transport}}
+        {:continue, Map.merge(state, %{channel: channel, buffer: ""})}
 
       {:rejected, peer_ip} ->
         Logger.warning("[MLLP.Connection] Rejected connection from #{peer_ip} — not in allowlist for channel #{channel_id}")
-        close(socket, transport)
-        {:stop, :normal}
+        {:close, state}
     end
   end
 
-  @impl true
-  # gen_tcp active mode messages
-  def handle_info({:tcp, _socket, data}, state) do
+  @impl ThousandIsland.Handler
+  def handle_data(data, socket, state) do
     Joy.ChannelStats.incr_received(state.channel_id)
-    new_state = process_buffer(%{state | buffer: state.buffer <> data})
-    {:noreply, new_state}
+    new_buffer = process_buffer(state.buffer <> data, socket, state)
+    {:continue, %{state | buffer: new_buffer}}
   end
 
-  def handle_info({:tcp_closed, _socket}, state) do
-    Logger.debug("[MLLP.Connection] Client disconnected (channel #{state.channel_id})")
-    {:stop, :normal, state}
+  @impl ThousandIsland.Handler
+  def handle_close(_socket, state) do
+    transport_label = if Map.get(state, :channel), do: "TLS client", else: "Client"
+    Logger.debug("[MLLP.Connection] #{transport_label} disconnected (channel #{state.channel_id})")
   end
 
-  def handle_info({:tcp_error, _socket, reason}, state) do
-    Logger.warning("[MLLP.Connection] TCP error on channel #{state.channel_id}: #{inspect(reason)}")
-    {:stop, reason, state}
+  @impl ThousandIsland.Handler
+  def handle_error(reason, _socket, state) do
+    Logger.warning("[MLLP.Connection] Error on channel #{state.channel_id}: #{inspect(reason)}")
   end
 
-  # ssl active mode messages
-  def handle_info({:ssl, _socket, data}, state) do
-    Joy.ChannelStats.incr_received(state.channel_id)
-    new_state = process_buffer(%{state | buffer: state.buffer <> data})
-    {:noreply, new_state}
-  end
-
-  def handle_info({:ssl_closed, _socket}, state) do
-    Logger.debug("[MLLP.Connection] TLS client disconnected (channel #{state.channel_id})")
-    {:stop, :normal, state}
-  end
-
-  def handle_info({:ssl_error, _socket, reason}, state) do
-    Logger.warning("[MLLP.Connection] TLS error on channel #{state.channel_id}: #{inspect(reason)}")
-    {:stop, reason, state}
-  end
-
-  def handle_info(_, state), do: {:noreply, state}
-
-  defp process_buffer(state) do
-    case Joy.MLLP.Framer.unwrap(state.buffer) do
+  # Returns the remaining buffer after processing all complete frames.
+  defp process_buffer(buffer, socket, state) do
+    case Joy.MLLP.Framer.unwrap(buffer) do
       {:ok, hl7_string, rest} ->
-        handle_message(hl7_string, state)
-        process_buffer(%{state | buffer: rest})
+        handle_message(hl7_string, socket, state)
+        process_buffer(rest, socket, state)
 
       :incomplete ->
-        state
+        buffer
 
       {:error, _} ->
         Logger.warning("[MLLP.Connection] Invalid MLLP frame, clearing buffer")
-        %{state | buffer: ""}
+        ""
     end
   end
 
-  defp handle_message(raw_hl7, state) do
+  defp handle_message(raw_hl7, socket, state) do
     case Joy.HL7.Parser.parse(raw_hl7) do
       {:ok, msg} ->
         message_control_id = Joy.HL7.get(msg, "MSH.10") || generate_control_id()
@@ -122,30 +84,26 @@ defmodule Joy.MLLP.Connection do
         case Joy.MessageLog.persist_pending(state.channel_id, message_control_id, raw_hl7) do
           {:ok, %{id: nil}} ->
             # Duplicate — already persisted (same message_control_id). Just ACK.
-            send_ack(state.socket, state.transport, msg, :aa)
+            send_ack(socket, msg, :aa)
 
           {:ok, entry} ->
-            send_ack(state.socket, state.transport, msg, :aa)
+            send_ack(socket, msg, :aa)
             dispatch_to_pipeline(state.channel_id, entry.id)
 
           {:error, reason} ->
             Logger.error("[MLLP.Connection] Failed to persist message: #{inspect(reason)}")
-            send_ack(state.socket, state.transport, msg, :ae)
+            send_ack(socket, msg, :ae)
         end
 
       {:error, reason} ->
         Logger.error("[MLLP.Connection] Failed to parse HL7: #{inspect(reason)}")
-        send_raw(state.socket, state.transport, minimal_ae_ack())
+        ThousandIsland.Socket.send(socket, minimal_ae_ack())
     end
   end
 
-  defp send_ack(socket, transport, msg, code) do
-    ack = Joy.MLLP.Framer.build_ack(msg, code)
-    send_raw(socket, transport, ack)
+  defp send_ack(socket, msg, code) do
+    ThousandIsland.Socket.send(socket, Joy.MLLP.Framer.build_ack(msg, code))
   end
-
-  defp send_raw(socket, :gen_tcp, data), do: :gen_tcp.send(socket, data)
-  defp send_raw(socket, :ssl, data), do: :ssl.send(socket, data)
 
   defp dispatch_to_pipeline(channel_id, entry_id) do
     case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
@@ -158,17 +116,10 @@ defmodule Joy.MLLP.Connection do
     :crypto.strong_rand_bytes(6) |> Base.encode16()
   end
 
-  # Returns :ok if the peer IP is permitted, {:rejected, ip_string} otherwise.
-  # An empty allowlist means accept from any IP.
-  defp check_peer_ip(_socket, [], _transport), do: :ok
+  defp check_peer_ip(_socket, []), do: :ok
 
-  defp check_peer_ip(socket, allowed_ips, transport) do
-    peername_fn = case transport do
-      :ssl -> &:ssl.peername/1
-      :gen_tcp -> &:inet.peername/1
-    end
-
-    case peername_fn.(socket) do
+  defp check_peer_ip(socket, allowed_ips) do
+    case ThousandIsland.Socket.peername(socket) do
       {:ok, {ip_tuple, _port}} ->
         peer_str = ip_tuple |> :inet.ntoa() |> to_string()
         if Enum.any?(allowed_ips, &ip_matches?(peer_str, ip_tuple, &1)),
@@ -180,12 +131,6 @@ defmodule Joy.MLLP.Connection do
         :ok
     end
   end
-
-  defp set_active(socket, :gen_tcp), do: :inet.setopts(socket, active: true)
-  defp set_active(socket, :ssl), do: :ssl.setopts(socket, active: true)
-
-  defp close(socket, :gen_tcp), do: :gen_tcp.close(socket)
-  defp close(socket, :ssl), do: :ssl.close(socket)
 
   defp ip_matches?(peer_str, peer_tuple, entry) do
     case String.split(entry, "/", parts: 2) do

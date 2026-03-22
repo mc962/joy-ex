@@ -1,13 +1,16 @@
 defmodule Joy.Channel.Supervisor do
   @moduledoc """
   Per-channel OTP supervisor. Contains:
-    [0] Joy.Channel.Pipeline  — processing brain
-    [1] Joy.MLLP.Server       — TCP listener
+    [0] Joy.Channel.WorkerSupervisor — Task.Supervisor for concurrent dispatch
+    [1] Joy.Channel.Pipeline         — processing brain
+    [2] Joy.MLLP.Server              — TCP listener
 
   Strategy: :rest_for_one (deliberate choice over :one_for_one)
-  - Pipeline [0] crash → restart Pipeline + MLLP.Server.
-    The Server must reconnect to the new Pipeline instance.
-  - Server [1] crash alone → restart only Server.
+  - WorkerSupervisor [0] crash → restart everything (rare; Task.Supervisor is very stable).
+  - Pipeline [1] crash → restart Pipeline + MLLP.Server.
+    WorkerSupervisor is NOT restarted; orphaned tasks complete and their results
+    are silently dropped (entries are requeued by the new Pipeline on startup).
+  - Server [2] crash alone → restart only Server.
     Pipeline state (counters, config) is preserved.
 
   Registered in Joy.ChannelRegistry so Joy.ChannelManager can find and
@@ -36,9 +39,11 @@ defmodule Joy.Channel.Supervisor do
   @impl true
   def init(channel) do
     children = [
-      # [0] Pipeline first — crash restarts both (rest_for_one)
+      # [0] WorkerSupervisor first — Task.Supervisor for async dispatch
+      {Joy.Channel.WorkerSupervisor, channel},
+      # [1] Pipeline second — crash restarts Pipeline + Server (rest_for_one)
       {Joy.Channel.Pipeline, channel},
-      # [1] Server second — crash restarts only itself
+      # [2] Server third — crash restarts only itself
       {Joy.MLLP.Server, channel}
     ]
     Supervisor.init(children, strategy: :rest_for_one)

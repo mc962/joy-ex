@@ -41,6 +41,7 @@ defmodule JoyWeb.Channels.ShowLive do
      |> assign(:ip_error, nil)
      |> assign(:tls_form, nil)
      |> assign(:alert_form, nil)
+     |> assign(:dispatch_form, nil)
      |> assign(:tls_key_editing, false)}
   end
 
@@ -78,7 +79,8 @@ defmodule JoyWeb.Channels.ShowLive do
         assign(socket,
           show_transform_modal: false, show_dest_modal: false,
           tls_form: to_form(Channels.Channel.changeset(channel, %{})),
-          alert_form: to_form(Channels.Channel.changeset(channel, %{}))
+          alert_form: to_form(Channels.Channel.changeset(channel, %{})),
+          dispatch_form: to_form(Channels.Channel.changeset(channel, %{}))
         )
     end
     {:noreply, socket}
@@ -272,6 +274,21 @@ defmodule JoyWeb.Channels.ShowLive do
 
       {:error, cs} ->
         {:noreply, assign(socket, :alert_form, to_form(cs))}
+    end
+  end
+
+  def handle_event("save_dispatch", %{"channel" => params}, socket) do
+    case Channels.update_channel(socket.assigns.channel, params) do
+      {:ok, updated} ->
+        Joy.Channel.Pipeline.reload_config(updated.id)
+        {:noreply,
+         socket
+         |> assign(:channel, updated)
+         |> assign(:dispatch_form, to_form(Channels.Channel.changeset(updated, %{})))
+         |> put_flash(:info, "Dispatch configuration saved.")}
+
+      {:error, cs} ->
+        {:noreply, assign(socket, :dispatch_form, to_form(cs))}
     end
   end
 
@@ -635,6 +652,43 @@ defmodule JoyWeb.Channels.ShowLive do
 
             <div>
               <button type="submit" class="btn btn-sm btn-primary">Save Alert Config</button>
+            </div>
+          </.form>
+        </div>
+      </div>
+
+      <%!-- Dispatch --%>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-5">
+          <h3 class="font-semibold mb-1">Dispatch</h3>
+          <p class="text-sm text-base-content/50 mb-1">
+            Controls how many messages this channel may process simultaneously.
+          </p>
+          <div class="text-sm text-base-content/50 mb-4 space-y-1">
+            <p>
+              <span class="font-medium text-base-content/70">1 (default) — serial:</span>
+              each message fully completes before the next begins. Delivery order is
+              guaranteed to match receive order. Best for systems that require strict sequencing.
+            </p>
+            <p>
+              <span class="font-medium text-base-content/70">2–20 — concurrent:</span>
+              up to N messages processed at the same time. Useful when a channel receives
+              from many simultaneous MLLP senders and the destination is slow (e.g. a 5-second
+              HTTP webhook). Trade-off: ordering is not guaranteed across concurrent senders —
+              two messages that arrive almost simultaneously may complete in either order.
+              Within a single MLLP connection the ACK protocol still serializes sends, so
+              per-connection ordering is always preserved.
+            </p>
+          </div>
+
+          <.form :if={@dispatch_form} for={@dispatch_form} phx-submit="save_dispatch" class="flex items-end gap-4">
+            <div class="form-control">
+              <label class="label"><span class="label-text">Max concurrent messages</span></label>
+              <input type="number" class="input input-bordered input-sm w-28" min="1" max="20"
+                     name="channel[dispatch_concurrency]" value={@channel.dispatch_concurrency} />
+            </div>
+            <div>
+              <button type="submit" class="btn btn-sm btn-primary">Save</button>
             </div>
           </.form>
         </div>

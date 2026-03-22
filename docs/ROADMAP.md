@@ -140,11 +140,13 @@ Items 1–8 are complete. Items 9–15 are the next wave, in rough priority orde
 
 ---
 
-## 11. Pipeline Non-blocking Dispatch ⏳ Planned
+## 11. Pipeline Non-blocking Dispatch ✅ Complete
 
-**Why:** The Pipeline GenServer currently processes one message at a time and blocks on slow/retrying destinations. A channel with a high-latency HTTP destination will see its throughput drop to that destination's RTT. This is a throughput bottleneck for busy channels.
-
-**Plan:** Introduce a bounded worker pool per channel (e.g. via `Task.Supervisor` or `poolboy`). The Pipeline queues dispatch tasks up to a configurable concurrency limit, so slow destinations no longer block the receive path.
+- Pipeline GenServer never blocks on I/O — each message is executed in a worker task under `Joy.Channel.WorkerSupervisor` (a per-channel `Task.Supervisor` added to the channel OTP tree at index [0])
+- `dispatch_concurrency` field on channels (default 1, max 20) controls how many tasks may run simultaneously; configurable per channel in the UI under the "Dispatch" section
+- `concurrency = 1` preserves strict FIFO ordering (same guarantee as before, but the GenServer is now non-blocking); `concurrency > 1` allows parallel dispatch across senders at the cost of cross-sender ordering
+- Local FIFO queue in Pipeline state (`pending_queue`) buffers messages when all slots are in use; GenServer mailbox provides outer backpressure
+- MLLP.Server migrated from a hand-rolled single-acceptor loop to **ThousandIsland** (already a transitive dep via Bandit), eliminating serialized TLS handshakes — 100 acceptors handle simultaneous TLS handshakes in parallel; stress test of 500 messages at 100 concurrent TLS connections went from ~10% failures to 0
 
 ---
 

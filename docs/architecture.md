@@ -13,6 +13,7 @@ Joy is an HL7 v2.x integration engine: it receives HL7 messages over MLLP (TCP),
 - [HL7 Representation](#hl7-representation)
 - [Clustering](#clustering)
 - [Web Interface](#web-interface)
+- [Dispatch Concurrency](#dispatch-concurrency)
 - [Organizations](#organizations)
 - [Message Log Retention](#message-log-retention)
 - [Data Model](#data-model)
@@ -25,12 +26,13 @@ A **channel** is the fundamental unit of work in Joy. Each channel represents a 
 
 Channels are independent. A crash in channel A — its transform script, its MLLP server, its destinations — cannot affect channel B. This isolation is enforced structurally at the process level, not by convention.
 
-At runtime, each channel is an isolated OTP supervisor tree containing exactly two processes:
+At runtime, each channel is an isolated OTP supervisor tree containing three components:
 
-- **Pipeline** — the processing brain. Holds the channel's config (transforms, destinations) in memory. Receives messages and processes them one at a time. Supports pause/resume: when paused, new dispatches are held in the DB as `:pending` and the MLLP server keeps accepting.
-- **MLLP.Server** — the TCP listener. Accepts plain TCP or TLS connections (per channel config), hands each to a short-lived Connection process, and sends ACKs.
+- **WorkerSupervisor** — a `Task.Supervisor` that owns the worker tasks executing message processing. By keeping it separate from the Pipeline, task crashes cannot crash the Pipeline GenServer.
+- **Pipeline** — the processing brain. Holds the channel's config (transforms, destinations) in memory. Dispatches messages to worker tasks via WorkerSupervisor; tracks `in_flight` count and a local pending queue to enforce `dispatch_concurrency`. Supports pause/resume: when paused, new dispatches are held in the DB as `:pending` and the MLLP server keeps accepting.
+- **MLLP.Server** — the TCP listener backed by ThousandIsland. Accepts plain TCP or TLS connections, runs up to 100 concurrent TLS handshakes via ThousandIsland's acceptor pool, and hands each accepted connection to a `Joy.MLLP.Connection` handler.
 
-Both run under a per-channel `:rest_for_one` supervisor. If the Pipeline crashes, both the Pipeline and MLLP.Server restart together (the Server needs a live Pipeline to dispatch to). If only the Server crashes, only the Server restarts — the Pipeline's state (counters, cached config) is preserved.
+All three run under a per-channel `:rest_for_one` supervisor. If the Pipeline crashes, the Pipeline and MLLP.Server restart together (the Server needs a live Pipeline to dispatch to); the WorkerSupervisor is not restarted so orphaned tasks can finish naturally. If only the Server crashes, only the Server restarts — the Pipeline's state is preserved.
 
 ---
 
@@ -79,7 +81,7 @@ Joy.MLLP.Connection       — one process per active TCP connection
 
 Steps 3 and 4 are ordered deliberately — see [At-Least-Once Delivery](#at-least-once-delivery).
 
-Step 5 is asynchronous (`GenServer.cast`): the Connection does not wait for processing to complete before handling the next message. The Pipeline processes one message at a time (its mailbox is the queue), which naturally serializes processing per channel. This matches MLLP's flow-control model: upstream senders wait for an ACK before sending the next message, so serialization at the channel level is correct behavior.
+Step 5 is asynchronous (`GenServer.cast`): the Connection does not wait for processing to complete before handling the next message. The Pipeline never blocks on I/O — it dispatches each message to a worker task via `Joy.Channel.WorkerSupervisor` and immediately returns to handle the next incoming cast. The `dispatch_concurrency` channel setting (default 1) controls how many tasks may run simultaneously; see [Dispatch Concurrency](#dispatch-concurrency).
 
 ---
 
@@ -96,7 +98,7 @@ Joy.Supervisor  (:one_for_one)
 ├── Joy.ChannelRegistry        Horde.Registry — distributed process registry
 │                              Keys: channel_id → Channel.Supervisor PID
 │                                    {:pipeline, channel_id} → Pipeline PID
-│                                    {:mllp_server, channel_id} → MLLP.Server PID
+│                                    {:workers, channel_id} → WorkerSupervisor PID
 │
 ├── Joy.TransformSupervisor    Task.Supervisor — sandboxed script execution (node-local)
 ├── Joy.ChannelStats           GenServer — ETS-backed per-channel throughput counters (node-local)
@@ -105,19 +107,18 @@ Joy.Supervisor  (:one_for_one)
 ├── Joy.Retention.Scheduler    GenServer — hourly tick; fires daily message log purge at configured UTC hour (node-local)
 ├── Joy.Sinks                  GenServer — in-memory test sink (node-local)
 │
-├── Joy.MLLP.ConnectionSupervisor   DynamicSupervisor (:one_for_one, node-local)
-│   ├── Joy.MLLP.Connection    per active TCP connection (:temporary — not restarted)
-│   └── ...
-│
 ├── Joy.ChannelSupervisor      Horde.DynamicSupervisor — distributed channel trees
 │   │
 │   ├── Joy.Channel.Supervisor  [channel 1]  (:rest_for_one)
-│   │   ├── [0] Joy.Channel.Pipeline         GenServer — processes messages
-│   │   └── [1] Joy.MLLP.Server              GenServer — TCP listener on mllp_port
+│   │   ├── [0] Joy.Channel.WorkerSupervisor  Task.Supervisor — worker tasks for concurrent dispatch
+│   │   ├── [1] Joy.Channel.Pipeline          GenServer — dispatch control and stats
+│   │   └── [2] Joy.MLLP.Server               ThousandIsland — TCP/TLS listener (100 acceptors)
+│   │       └── Joy.MLLP.Connection           ThousandIsland.Handler — one per active connection
 │   │
 │   ├── Joy.Channel.Supervisor  [channel 2]  (:rest_for_one)
-│   │   ├── [0] Joy.Channel.Pipeline
-│   │   └── [1] Joy.MLLP.Server
+│   │   ├── [0] Joy.Channel.WorkerSupervisor
+│   │   ├── [1] Joy.Channel.Pipeline
+│   │   └── [2] Joy.MLLP.Server
 │   │
 │   └── ...  (one tree per started channel, distributed across cluster nodes)
 │
@@ -127,9 +128,9 @@ Joy.Supervisor  (:one_for_one)
 
 **Why `:one_for_one` at the top?** Each child serves a completely different function. A crashed Repo should not restart the PubSub; a crashed Endpoint should not restart ChannelManager. Every child is independent.
 
-**Why `:rest_for_one` per channel?** The Pipeline must be alive before the MLLP.Server can dispatch messages to it. If the Pipeline crashes, the Server is also restarted so it connects to the fresh Pipeline. If only the Server crashes (e.g., port conflict on restart), the Pipeline's in-memory stats and cached config are preserved.
+**Why `:rest_for_one` per channel?** The Pipeline must be alive before the MLLP.Server can dispatch messages to it. If the Pipeline crashes, the Server is also restarted so it connects to the fresh Pipeline. If only the Server crashes (e.g., port conflict on restart), the Pipeline's in-memory stats and cached config are preserved. The WorkerSupervisor sits at index [0] so it is not restarted when the Pipeline crashes — this allows in-flight worker tasks to complete and send their results to the old (dead) Pipeline pid, which are silently dropped; the new Pipeline requeues those entries from the DB on startup.
 
-**Why is `ConnectionSupervisor` node-local while `ChannelSupervisor` is distributed?** TCP connections are inherently tied to the machine that accepted them. When a connection closes or the node dies, the connection process is gone regardless. There is nothing to distribute. Channel supervisor trees, by contrast, represent persistent channel state that should survive node failures — that is exactly what Horde provides.
+**Why ThousandIsland for MLLP.Server?** ThousandIsland is already a dependency (via Bandit) and provides a battle-tested acceptor pool that handles concurrent TLS handshakes correctly. The previous hand-rolled acceptor loop serialized TLS handshakes — one at a time — which caused connection timeouts under burst load. ThousandIsland runs 100 acceptor processes against the same listen socket, so up to 100 handshakes proceed simultaneously with no coordination overhead. `Joy.MLLP.Connection` is now a plain `ThousandIsland.Handler` with data arriving via callbacks instead of active-mode process messages.
 
 **`ChannelManager`** is not the supervisor — it is a GenServer that provides the `start_channel/1`, `stop_channel/1`, `pause_channel/1`, and `resume_channel/1` API. On startup it reads `started: true` channels from the database and starts their OTP trees via `Horde.DynamicSupervisor`. The ChannelManager runs on every node; Horde deduplicates.
 
@@ -333,6 +334,20 @@ The dashboard and channel pages use Phoenix LiveView. Pipeline stats (processed 
 
 ---
 
+## Dispatch Concurrency
+
+Each channel has a `dispatch_concurrency` setting (integer, default 1, max 20) that controls how many worker tasks the Pipeline runs simultaneously.
+
+**concurrency = 1 (default):** The Pipeline spawns a task for each message but will not spawn the next until the current one sends `{:dispatch_done, ...}` back. Delivery order matches receive order. This is the right choice for any downstream system that requires strict sequencing. The Pipeline GenServer itself is never blocked — it processes incoming `cast` messages immediately and manages the task lifecycle through message passing.
+
+**concurrency > 1:** Up to N tasks run simultaneously. Useful when a channel receives from many concurrent MLLP senders and has a slow destination (e.g. a high-latency HTTP webhook). Order is not guaranteed across concurrent senders. Within a single MLLP connection, the ACK-before-next protocol serializes sends at the sender, so per-connection ordering is always preserved regardless of this setting.
+
+Messages that arrive while `in_flight >= concurrency` are buffered in a local FIFO queue in Pipeline state and dispatched as slots open. The GenServer mailbox acts as outer backpressure.
+
+The setting is configurable per channel in the UI under the "Dispatch" section of the channel detail page. Changes take effect after saving (Pipeline reloads its channel config).
+
+---
+
 ## Organizations
 
 An **organization** groups a set of channels under a shared name — typically a health system or facility. Organizations are a UI and config grouping only; they do not affect message routing or processing.
@@ -388,6 +403,7 @@ channels
   organization_id (FK → organizations, nilify_all)  — optional grouping; nil = ungrouped
   allowed_ips (string[])           — source IP allowlist; empty = allow all; see effective_allowed_ips/1
   paused (bool)                    — pipeline holds pending messages; MLLP server keeps accepting
+  dispatch_concurrency (int)       — max simultaneous worker tasks; 1 = strict serial (default)
   tls_enabled (bool)
   tls_cert_pem (text)              — server certificate PEM (public)
   tls_key_pem (binary)             — private key PEM, encrypted at rest (Joy.Encrypted.StringType)
