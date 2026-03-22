@@ -9,6 +9,8 @@ defmodule Joy.Channel.Pipeline do
     4. Runs each enabled transform in order via Joy.Transform.Runner
     5. Delivers to all enabled destinations (or only routed ones)
     6. Tracks throughput stats; broadcasts to PubSub for LiveView dashboard
+    7. Supports pause/resume: when paused, messages sit as :pending in DB
+    8. Reports consecutive failures to Joy.Alerting for alert threshold checking
 
   Why sequential (single GenServer) instead of concurrent Task pool?
   MLLP ACK-based flow means senders naturally serialize messages per connection.
@@ -24,7 +26,7 @@ defmodule Joy.Channel.Pipeline do
   require Logger
 
   defstruct channel: nil, processed_count: 0, failed_count: 0,
-            last_error: nil, last_message_at: nil
+            last_error: nil, last_message_at: nil, paused: false
 
   def start_link(%Joy.Channels.Channel{} = channel) do
     GenServer.start_link(__MODULE__, channel, name: via(channel.id))
@@ -58,12 +60,25 @@ defmodule Joy.Channel.Pipeline do
     end
   end
 
-  @impl true
-  def init(%Joy.Channels.Channel{} = channel) do
-    {:ok, %__MODULE__{channel: channel}, {:continue, :requeue_pending}}
+  @doc "Set paused state on a running pipeline. When unpausing, requeues all pending messages."
+  def set_paused(channel_id, paused) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
+      [{pid, _}] -> GenServer.cast(pid, {:set_paused, paused})
+      [] -> :ok
+    end
   end
 
   @impl true
+  def init(%Joy.Channels.Channel{} = channel) do
+    {:ok, %__MODULE__{channel: channel, paused: channel.paused}, {:continue, :requeue_pending}}
+  end
+
+  @impl true
+  def handle_continue(:requeue_pending, %{paused: true} = state) do
+    Logger.info("[Pipeline #{state.channel.id}] Channel is paused — skipping requeue on startup")
+    {:noreply, state}
+  end
+
   def handle_continue(:requeue_pending, state) do
     pending = Joy.MessageLog.list_pending(state.channel.id)
     if pending != [], do: Logger.info("[Pipeline #{state.channel.id}] Requeueing #{length(pending)} pending message(s)")
@@ -76,15 +91,36 @@ defmodule Joy.Channel.Pipeline do
     {:noreply, do_process(entry_id, state)}
   end
 
+  def handle_info(_, state), do: {:noreply, state}
+
   @impl true
+  def handle_cast({:process, _entry_id}, %{paused: true} = state) do
+    # Message is already persisted as :pending in the DB; it will be requeued on resume.
+    {:noreply, state}
+  end
+
   def handle_cast({:process, entry_id}, state) do
     {:noreply, do_process(entry_id, state)}
   end
 
-  @impl true
   def handle_cast(:reload_config, state) do
     channel = Joy.Channels.get_channel!(state.channel.id)
-    {:noreply, %{state | channel: channel}}
+    {:noreply, %{state | channel: channel, paused: channel.paused}}
+  end
+
+  def handle_cast({:set_paused, false}, state) do
+    # Unpausing: reload config from DB and requeue all pending messages.
+    channel = Joy.Channels.get_channel!(state.channel.id)
+    pending = Joy.MessageLog.list_pending(channel.id)
+    if pending != [], do: Logger.info("[Pipeline #{channel.id}] Resuming: requeueing #{length(pending)} pending message(s)")
+    Enum.each(pending, fn entry -> send(self(), {:cast_process, entry.id}) end)
+    {:noreply, %{state | channel: channel, paused: false}}
+  end
+
+  def handle_cast({:set_paused, true}, state) do
+    channel = Joy.Channels.get_channel!(state.channel.id)
+    Logger.info("[Pipeline #{channel.id}] Channel paused — pipeline will hold new dispatches")
+    {:noreply, %{state | channel: channel, paused: true}}
   end
 
   @impl true
@@ -98,6 +134,8 @@ defmodule Joy.Channel.Pipeline do
     case Joy.HL7.Parser.parse(entry.raw_hl7) do
       {:error, reason} ->
         Joy.MessageLog.mark_failed(entry_id, "Parse error: #{inspect(reason)}")
+        Joy.ChannelStats.incr_failed(state.channel.id)
+        Joy.Alerting.record_failure(state.channel)
         new_state = %{state | failed_count: state.failed_count + 1, last_error: inspect(reason)}
         broadcast_stats(new_state)
         new_state
@@ -108,6 +146,8 @@ defmodule Joy.Channel.Pipeline do
         case run_transforms(transforms, msg) do
           {:error, reason} ->
             Joy.MessageLog.mark_failed(entry_id, reason)
+            Joy.ChannelStats.incr_failed(state.channel.id)
+            Joy.Alerting.record_failure(state.channel)
             new_state = %{state | failed_count: state.failed_count + 1, last_error: reason}
             broadcast_stats(new_state)
             new_state
@@ -116,6 +156,8 @@ defmodule Joy.Channel.Pipeline do
             deliver_to_destinations(transformed_msg, state.channel.destination_configs)
             raw_out = Joy.HL7.to_string(transformed_msg)
             Joy.MessageLog.mark_processed(entry_id, raw_out)
+            Joy.ChannelStats.incr_processed(state.channel.id)
+            Joy.Alerting.record_success(state.channel.id)
             new_state = %{state |
               processed_count: state.processed_count + 1,
               last_message_at: DateTime.utc_now()
@@ -161,15 +203,27 @@ defmodule Joy.Channel.Pipeline do
   end
 
   defp stats_map(state) do
+    today = Joy.ChannelStats.get_today(state.channel.id)
     %{
       processed_count: state.processed_count,
       failed_count: state.failed_count,
       last_error: state.last_error,
-      last_message_at: state.last_message_at
+      last_message_at: state.last_message_at,
+      paused: state.paused,
+      today_received: today.received,
+      today_processed: today.processed,
+      today_failed: today.failed,
+      retry_queue_depth: today.retry_queue_depth
     }
   end
 
-  defp default_stats, do: %{processed_count: 0, failed_count: 0, last_error: nil, last_message_at: nil}
+  defp default_stats do
+    %{
+      processed_count: 0, failed_count: 0, last_error: nil, last_message_at: nil,
+      paused: false, today_received: 0, today_processed: 0, today_failed: 0,
+      retry_queue_depth: 0
+    }
+  end
 
   # For sink destinations, the routing key is config["name"] (the sink bucket identifier).
   # For all other adapters, it's the destination display name.

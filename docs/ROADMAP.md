@@ -1,100 +1,107 @@
 # Joy Roadmap
 
-Features not yet implemented, ordered by priority. Security and operational reliability items come first given Joy's healthcare context.
+All planned features have been implemented. This document records what was built and why.
 
 ---
 
-## 1. MLLP TLS
+## 1. MLLP TLS ✅ Implemented
 
 **Why first:** MLLP sends raw HL7 over TCP — PHI travels in plaintext. HIPAA requires encryption in transit. Every other improvement is secondary to this in a production deployment.
 
-**What's needed:**
-- Replace `Ranch` `:ranch_tcp` transport with `:ranch_ssl` in `Joy.MLLP.Server`
-- Per-channel TLS config: cert path, key path, optional CA/client cert for mutual TLS
-- Store cert paths (or PEM content) in `destination_configs` or a new `channel_tls_config` table — encrypt private key at rest with the existing `Joy.Encrypted.MapType`
-- Dev/test: accept self-signed certs; production: Let's Encrypt or org CA
+**What was built:**
+- `Joy.MLLP.Server` branches on `channel.tls_enabled`: uses `:ssl.transport_accept/1` + `:ssl.handshake/1` for TLS, `:gen_tcp.accept/1` for plain TCP
+- `Joy.MLLP.Connection` carries the transport (`:gen_tcp` | `:ssl`) in state; handles `{:ssl, ...}` / `{:tcp, ...}` active-mode messages accordingly
+- Per-channel TLS config stored as PEM content in the database (not file paths): `tls_cert_pem`, `tls_key_pem` (encrypted at rest via `Joy.Encrypted.StringType`), `tls_ca_cert_pem`, `tls_verify_peer`, `tls_cert_expires_at`
+- `Joy.CertParser` extracts CN, issuer, SANs, and expiry from PEM using `:public_key` — no external deps
+- `Joy.CertMonitor` GenServer runs a daily check; fires alerts via `Joy.Alerting.send_direct/3` for certs expiring within 30 days
+- Channel show page: TLS config form with PEM textareas; write-only private key (replace button); cert info panel (CN, issuer, SANs, expiry, days remaining); expiry warning badge; "Copy cert" button for sharing with connecting systems
+- Dashboard: cert expiry warning banner lists channels with certs expiring within 30 days
+- MLLP test client and stress test tool support TLS connections (`tls: true` opt, `verify: :verify_none`) so channels with TLS enabled can be tested from the UI
+- Dev/test: `mix phx.gen.cert` produces `priv/cert.pem` and `priv/key.pem` that can be pasted directly into the channel TLS form
 
 ---
 
-## 2. Source IP Allowlisting per Channel
+## 2. Source IP Allowlisting per Channel ✅ Implemented
 
 **Why second:** Prevents unauthorized parties from injecting HL7 messages into a channel's MLLP port. Without this, anyone who can reach the port can send messages.
 
-**What's needed:**
-- Add `allowed_ips` field to `channels` table (list of CIDR strings, null = allow all)
-- In `Joy.MLLP.Connection.init/1`, call `:inet.peername/1`, check against the allowlist, close socket with a log warning if rejected
-- UI: editable IP allowlist on the channel show/edit page
+**What was built:**
+- `allowed_ips` field on `channels` table (list of CIDR strings, empty = allow all)
+- In `Joy.MLLP.Connection.init/1`, calls `:inet.peername/1` (or `:ssl.peername/1` for TLS), checks against the allowlist, closes socket with a log warning if rejected
+- Supports plain IPs (`10.0.0.5`) and CIDR ranges (`10.0.0.0/24`)
+- UI: editable IP allowlist on the channel show page
 
 ---
 
-## 3. Dead Letter Queue UI
+## 3. Dead Letter Queue UI ✅ Implemented
 
 **Why third:** After `max_retries` exhausted, `:failed` entries sit silently in the DB. In healthcare, a permanently failed message may mean a patient record didn't update. Someone needs to see it and act on it.
 
-**What's needed:**
-- Dashboard widget: count of `:failed` entries across all channels, links to the offending channel logs
-- On the message log page: "Retry All Failed" bulk action button
-- Consider a global `/messages/failed` view across all channels for admins
-- No new data model needed — `status: "failed"` entries already exist
+**What was built:**
+- Dashboard widget: total count of all `:failed` entries across all channels (from DB), with a "View all" link when count is non-zero
+- Message log page: "Retry All Failed (N)" bulk action button that marks all failed entries as `:retried`, inserts fresh `:pending` entries, and dispatches them to the pipeline
+- Global `/messages/failed` view across all channels: shows channel name, message type, patient ID, error, with per-entry retry
 
 ---
 
-## 4. Channel Pause/Resume
+## 4. Channel Pause/Resume ✅ Implemented
 
 **Why fourth:** Planned maintenance on a downstream system shouldn't require deleting and recreating a channel. Pausing stops the pipeline from processing new messages while still accepting and logging them (so nothing is lost).
 
-**What's needed:**
-- Add `status` field to `channels` table: `:active` | `:paused`
-- When paused: MLLP server continues accepting connections and persisting messages (at-least-once still holds), but the pipeline does not dispatch
-- When resumed: pipeline requeues all `:pending` entries (same logic as startup)
-- `Joy.ChannelManager`: `pause_channel/1` and `resume_channel/1`
-- UI: pause/resume button on channel show page with clear visual state indicator
+**What was built:**
+- `paused` boolean on the `channels` table (default false)
+- When paused: MLLP server continues accepting connections and persisting messages (at-least-once still holds); Pipeline receives `{:process, _}` casts but silently holds them — messages stay `:pending` in DB
+- When resumed: Pipeline reloads config and requeues all `:pending` entries via `list_pending` (same logic as startup)
+- `Joy.ChannelManager.pause_channel/1` and `resume_channel/1`
+- Dashboard and channel show page: Pause/Resume buttons; "Paused" badge distinct from "Running"
 
 ---
 
-## 5. Per-Channel Statistics
+## 5. Per-Channel Statistics ✅ Implemented
 
 **Why fifth:** Operators need quantitative visibility — "Channel ADT: 1,247 messages today, 3 failed" — without querying the DB directly.
 
-**What's needed:**
-- Lightweight counters: messages received today, processed today, failed today, current retry queue depth
-- Options: ETS counters (fast, lost on restart, fine for "today" stats) or DB aggregates (durable, slightly slower)
-- Recommend: ETS for live counters (reset on node restart is acceptable), DB for historical daily roll-ups
-- Surface on: channel show page and dashboard cards
-- Stretch: simple sparkline of message volume over the last 24h
+**What was built:**
+- `Joy.ChannelStats` GenServer backed by ETS table `{channel_id, date, received, processed, failed}`
+- Counters reset automatically when the date rolls over (detected lazily on read); lost on node restart — acceptable for live "today" metrics
+- `incr_received/1` called from `Joy.MLLP.Connection` on each message arrival; `incr_processed/1` and `incr_failed/1` called from `Joy.Channel.Pipeline`
+- Retry queue depth queried from DB on demand (count of `:pending` entries for the channel)
+- Dashboard: Today Recv / Proc / Fail columns in the channel table
+- Channel show page: today stat row (received, processed, failed, queue depth) + session failure count
 
 ---
 
-## 6. Message Search
+## 6. Message Search ✅ Implemented
 
 **Why sixth:** The message log has status filtering but no way to find a specific patient's messages or a specific message type. "Did this patient's lab result arrive?" currently requires a DB query.
 
-**What's needed:**
-- Filter by: message type/event (MSH.9, e.g. `ADT^A01`), patient ID (PID.3 or PID.5), date range, message control ID substring
-- Implementation: index `raw_hl7` is not practical; better to extract `message_type` and `patient_id` at persist time into dedicated columns on `message_log_entries`
-- Migration: add `message_type varchar`, `patient_id varchar` columns; populate from `MSH.9` and `PID.3` during `persist_pending/3`
-- UI: filter bar above the message log table
+**What was built:**
+- `message_type varchar` and `patient_id varchar` columns on `message_log_entries`, with indexes
+- Extracted at `persist_pending` time from MSH.9 (message type) and PID.3 (patient ID) — no re-parsing on search
+- `Joy.MessageLog.list_recent/2` accepts `message_type:`, `patient_id:`, `date_from:`, `date_to:` opts with `ilike` substring matching
+- Message log page: search bar (message type + patient ID) with Submit and Clear; table adds Patient ID column
 
 ---
 
-## 7. Transform Testing / Preview
+## 7. Transform Testing / Preview ✅ Implemented
 
 **Why seventh:** Currently a transform must be saved and a live message must arrive to test it. This creates a slow feedback loop and risks deploying a broken transform to production.
 
-**What's needed:**
-- UI panel on the transform editor: paste a sample HL7 message, click "Run", see the transformed output (or error with line number)
-- Backend: new controller/LiveView action that calls the existing `Joy.Transform.Runner` sandbox directly — no DB writes, no pipeline dispatch
-- The sandbox (`Task.Supervisor.async_nolink`, 5s timeout, AST whitelist) already exists; this is purely a UI addition
+**What was built:**
+- The transform editor (`/channels/:id/transforms/:transform_id/editor`) has a three-panel layout: script (left), test input (top right), output (bottom right)
+- "Run" button parses the test input as HL7, executes the current script via `Joy.Transform.Runner` in the existing sandbox (no DB writes, no pipeline dispatch), and shows the transformed output or error with line number
+- The sandbox is identical to production execution: `async_nolink` Task under `Joy.TransformSupervisor`, 5s timeout, AST whitelist validation
 
 ---
 
-## 8. Alerting on Sustained Failures
+## 8. Alerting on Sustained Failures ✅ Implemented
 
 **Why last:** Important for production, but the other gaps are more immediately impactful. Without alerting, a broken channel can go unnoticed for hours.
 
-**What's needed:**
-- Trigger: N consecutive failures on a channel (configurable, default 5), or failure rate > X% in a rolling window
-- Delivery: email via the existing `Joy.Mailer` / Swoosh setup; optionally a webhook (POST to a configured URL)
-- Per-channel alert config: enabled/disabled, threshold, recipient email or webhook URL
-- Implementation: track consecutive failure count in ETS (reset on success); check threshold in `Joy.Channel.Pipeline` after `mark_failed/2`
-- Cooldown: don't re-alert for the same channel within N minutes to avoid alert fatigue
+**What was built:**
+- `Joy.Alerting` GenServer backed by ETS table `{channel_id, consecutive_failures, last_alert_at}`
+- `record_failure/1` increments the counter and fires an alert when the threshold is reached, respecting the per-channel cooldown window
+- `record_success/1` resets the consecutive failure counter on any successful message
+- Alert delivery: email via `Joy.Mailer` / Swoosh when `alert_email` is configured; HTTP webhook POST (JSON payload) via `Req` when `alert_webhook_url` is configured
+- Per-channel config on the `channels` table: `alert_enabled`, `alert_threshold` (default 5), `alert_email`, `alert_webhook_url`, `alert_cooldown_minutes` (default 60)
+- Channel show page: alert configuration form

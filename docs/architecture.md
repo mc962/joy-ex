@@ -25,8 +25,8 @@ Channels are independent. A crash in channel A — its transform script, its MLL
 
 At runtime, each channel is an isolated OTP supervisor tree containing exactly two processes:
 
-- **Pipeline** — the processing brain. Holds the channel's config (transforms, destinations) in memory. Receives messages and processes them one at a time.
-- **MLLP.Server** — the TCP listener. Accepts connections, hands each to a short-lived Connection process, and sends ACKs.
+- **Pipeline** — the processing brain. Holds the channel's config (transforms, destinations) in memory. Receives messages and processes them one at a time. Supports pause/resume: when paused, new dispatches are held in the DB as `:pending` and the MLLP server keeps accepting.
+- **MLLP.Server** — the TCP listener. Accepts plain TCP or TLS connections (per channel config), hands each to a short-lived Connection process, and sends ACKs.
 
 Both run under a per-channel `:rest_for_one` supervisor. If the Pipeline crashes, both the Pipeline and MLLP.Server restart together (the Server needs a live Pipeline to dispatch to). If only the Server crashes, only the Server restarts — the Pipeline's state (counters, cached config) is preserved.
 
@@ -53,6 +53,7 @@ Joy.MLLP.Connection       — one process per active TCP connection
       ├─ 2. Parse the HL7 message → %Message{segments: [...], ...}
       │
       ├─ 3. Persist to message_log as :pending   ◄── BEFORE sending ACK
+      │      (extracts message_type from MSH.9 and patient_id from PID.3 for search)
       │
       ├─ 4. Send ACK (AA = accepted, AE = error)
       │
@@ -96,6 +97,9 @@ Joy.Supervisor  (:one_for_one)
 │                                    {:mllp_server, channel_id} → MLLP.Server PID
 │
 ├── Joy.TransformSupervisor    Task.Supervisor — sandboxed script execution (node-local)
+├── Joy.ChannelStats           GenServer — ETS-backed per-channel throughput counters (node-local)
+├── Joy.Alerting               GenServer — ETS-backed consecutive failure tracking + alert delivery (node-local)
+├── Joy.CertMonitor            GenServer — daily TLS cert expiry check; fires alerts via Joy.Alerting (node-local)
 ├── Joy.Sinks                  GenServer — in-memory test sink (node-local)
 │
 ├── Joy.MLLP.ConnectionSupervisor   DynamicSupervisor (:one_for_one, node-local)
@@ -124,7 +128,11 @@ Joy.Supervisor  (:one_for_one)
 
 **Why is `ConnectionSupervisor` node-local while `ChannelSupervisor` is distributed?** TCP connections are inherently tied to the machine that accepted them. When a connection closes or the node dies, the connection process is gone regardless. There is nothing to distribute. Channel supervisor trees, by contrast, represent persistent channel state that should survive node failures — that is exactly what Horde provides.
 
-**`ChannelManager`** is not the supervisor — it is a GenServer that provides the `start_channel/1` and `stop_channel/1` API. On startup it reads `started: true` channels from the database and starts their OTP trees via `Horde.DynamicSupervisor`. The ChannelManager runs on every node; Horde deduplicates.
+**`ChannelManager`** is not the supervisor — it is a GenServer that provides the `start_channel/1`, `stop_channel/1`, `pause_channel/1`, and `resume_channel/1` API. On startup it reads `started: true` channels from the database and starts their OTP trees via `Horde.DynamicSupervisor`. The ChannelManager runs on every node; Horde deduplicates.
+
+**`ChannelStats` and `Alerting`** are node-local GenServers backed by ETS. `ChannelStats` tracks received/processed/failed counts per channel per day; `Alerting` tracks consecutive failures and fires email/webhook alerts when a per-channel threshold is exceeded. Both are intentionally node-local: they track ephemeral runtime state that resets on restart, not durable data.
+
+**`CertMonitor`** is a node-local GenServer that runs a TLS certificate expiry check on startup and every 24 hours. It queries channels whose `tls_cert_expires_at` is within 30 days and calls `Joy.Alerting.send_direct/3` to fire an email/webhook alert. Because it reads from the database, it works correctly regardless of which node is running each channel.
 
 ---
 
@@ -301,13 +309,14 @@ Authentication uses `phx.gen.auth` (email + password + magic link via email toke
 
 | Path | Purpose |
 |---|---|
-| `/` | Dashboard — channel status overview |
+| `/` | Dashboard — channel status, throughput stats, cert expiry warnings |
 | `/channels` | Channel list; create new channels |
-| `/channels/:id` | Channel detail — transforms, destinations, start/stop |
-| `/channels/:id/transforms/:id/editor` | Full-screen transform script editor |
-| `/channels/:id/messages` | Message log — recent entries, status, retry |
+| `/channels/:id` | Channel detail — transforms, destinations, TLS config, alerting, pause/resume |
+| `/channels/:id/transforms/:id/editor` | Full-screen transform script editor with live preview |
+| `/channels/:id/messages` | Message log — search by message type / patient ID, retry failed |
+| `/messages/failed` | Global dead letter queue — all failed messages across all channels |
 | `/users` | User list — admin management |
-| `/tools/mllp-client` | Interactive MLLP client for testing channels |
+| `/tools/mllp-client` | Interactive MLLP client (plain TCP and TLS) for testing channels |
 | `/tools/sinks` | View in-memory sink contents for testing destinations |
 
 ### Real-time updates
@@ -323,17 +332,32 @@ Five tables, all in the `joy` Postgres database:
 ```
 channels
   id, name, description, mllp_port (unique), started, inserted_at, updated_at
+  allowed_ips (string[])           — source IP allowlist; empty = allow all
+  paused (bool)                    — pipeline holds pending messages; MLLP server keeps accepting
+  tls_enabled (bool)
+  tls_cert_pem (text)              — server certificate PEM (public)
+  tls_key_pem (binary)             — private key PEM, encrypted at rest (Joy.Encrypted.StringType)
+  tls_ca_cert_pem (text)           — CA cert for verifying client certs in mTLS (public)
+  tls_cert_expires_at (utc_datetime) — parsed from cert at save time; queried by Joy.CertMonitor
+  tls_verify_peer (bool)           — require client certificate (mutual TLS)
+  alert_enabled (bool)
+  alert_threshold (int)            — consecutive failures before alerting
+  alert_email (string)
+  alert_webhook_url (string)
+  alert_cooldown_minutes (int)     — minimum minutes between alerts for the same channel
 
 transform_steps
-  id, channel_id (FK), name, script, enabled, order, inserted_at, updated_at
+  id, channel_id (FK), name, script, enabled, position, inserted_at, updated_at
 
 destination_configs
-  id, channel_id (FK), name, adapter, config (encrypted jsonb),
+  id, channel_id (FK), name, adapter, config (encrypted binary),
   enabled, retry_attempts, retry_base_ms, inserted_at, updated_at
 
 message_log_entries
   id, channel_id (FK), message_control_id, status (pending/processed/failed/retried),
   raw_hl7, transformed_hl7, error, processed_at, inserted_at, updated_at
+  message_type (varchar, indexed)  — MSH.9, extracted at persist time for search
+  patient_id (varchar, indexed)    — PID.3, extracted at persist time for search
   UNIQUE INDEX (channel_id, message_control_id) WHERE message_control_id IS NOT NULL
 
 users  (phx.gen.auth standard)
@@ -343,6 +367,8 @@ user_tokens  (phx.gen.auth standard)
   id, user_id (FK), token, context, sent_to, inserted_at
 ```
 
-`destination_configs.config` is an encrypted JSON map. The Ecto type (`Joy.Encrypted.MapType`) transparently encrypts on insert and decrypts on load using AES-256-GCM with the `ENCRYPTION_KEY`. The `config` field schema is adapter-specific (e.g., `%{"url" => "...", "secret" => "..."}` for webhooks).
+`destination_configs.config` is an encrypted binary (map serialized as JSON then AES-256-GCM encrypted). The Ecto type (`Joy.Encrypted.MapType`) transparently encrypts on insert and decrypts on load using the `ENCRYPTION_KEY`. Adapters see a plaintext map.
+
+`channels.tls_key_pem` uses the same encryption scheme via `Joy.Encrypted.StringType`, which encrypts/decrypts the raw PEM string rather than a JSON map. The server cert and CA cert are public data and stored as plain text.
 
 `message_log_entries` is the only table that grows unboundedly. It contains raw HL7 (PHI). Plan a retention policy appropriate to your compliance requirements.

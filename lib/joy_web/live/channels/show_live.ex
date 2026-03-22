@@ -1,6 +1,7 @@
 defmodule JoyWeb.Channels.ShowLive do
-  @moduledoc "Channel detail page: config, transforms, destinations."
+  @moduledoc "Channel detail page: config, transforms, destinations, TLS, IP allowlist, alerting."
   use JoyWeb, :live_view
+  require Logger
   alias Joy.Channels
   alias Joy.Channels.{TransformStep, DestinationConfig}
 
@@ -17,7 +18,7 @@ defmodule JoyWeb.Channels.ShowLive do
 
     stats =
       if running?, do: Joy.Channel.Pipeline.get_stats(channel.id),
-      else: %{processed_count: 0, failed_count: 0, last_error: nil, last_message_at: nil}
+      else: default_stats(channel)
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Joy.PubSub, "channels")
@@ -37,7 +38,10 @@ defmodule JoyWeb.Channels.ShowLive do
      |> assign(:editing_transform, nil)
      |> assign(:editing_dest, nil)
      |> assign(:selected_adapter, "http_webhook")
-     |> assign(:ip_error, nil)}
+     |> assign(:ip_error, nil)
+     |> assign(:tls_form, nil)
+     |> assign(:alert_form, nil)
+     |> assign(:tls_key_editing, false)}
   end
 
   @impl true
@@ -71,7 +75,11 @@ defmodule JoyWeb.Channels.ShowLive do
         end
 
       _ ->
-        assign(socket, show_transform_modal: false, show_dest_modal: false)
+        assign(socket,
+          show_transform_modal: false, show_dest_modal: false,
+          tls_form: to_form(Channels.Channel.changeset(channel, %{})),
+          alert_form: to_form(Channels.Channel.changeset(channel, %{}))
+        )
     end
     {:noreply, socket}
   end
@@ -100,6 +108,18 @@ defmodule JoyWeb.Channels.ShowLive do
     Joy.ChannelManager.stop_channel(channel.id)
     Channels.set_started(channel, false)
     {:noreply, assign(socket, :running?, false)}
+  end
+
+  def handle_event("pause_channel", _, socket) do
+    Joy.ChannelManager.pause_channel(socket.assigns.channel.id)
+    channel = Channels.get_channel!(socket.assigns.channel.id)
+    {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, true))}
+  end
+
+  def handle_event("resume_channel", _, socket) do
+    Joy.ChannelManager.resume_channel(socket.assigns.channel.id)
+    channel = Channels.get_channel!(socket.assigns.channel.id)
+    {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, false))}
   end
 
   def handle_event("close_transform_modal", _, socket) do
@@ -203,6 +223,62 @@ defmodule JoyWeb.Channels.ShowLive do
     {:noreply, assign(socket, :channel, channel)}
   end
 
+  def handle_event("save_tls", %{"channel" => params}, socket) do
+    # Don't overwrite existing key with empty string (key field hidden when not editing)
+    params = if params["tls_key_pem"] == "" or params["tls_key_pem"] == nil,
+      do: Map.delete(params, "tls_key_pem"),
+      else: params
+
+    # Parse cert to populate tls_cert_expires_at so CertMonitor can check expiry
+    params = case params["tls_cert_pem"] do
+      pem when is_binary(pem) and pem != "" ->
+        case Joy.CertParser.parse(pem) do
+          {:ok, %{expires_at: dt}} -> Map.put(params, "tls_cert_expires_at", dt)
+          _ -> params
+        end
+      _ -> params
+    end
+
+    case Channels.update_channel(socket.assigns.channel, params) do
+      {:ok, updated} ->
+        # Restart server to pick up new TLS config (stop + start pipeline tree)
+        if Joy.ChannelManager.channel_running?(updated.id) do
+          Joy.ChannelManager.stop_channel(updated.id)
+          with {:error, reason} <- Joy.ChannelManager.start_channel(updated) do
+            Logger.error("[ShowLive] Failed to restart channel #{updated.id} after TLS save: #{inspect(reason)}")
+          end
+        end
+        {:noreply,
+         socket
+         |> assign(:channel, updated)
+         |> assign(:tls_key_editing, false)
+         |> assign(:tls_form, to_form(Channels.Channel.changeset(updated, %{})))
+         |> put_flash(:info, "TLS configuration saved.")}
+
+      {:error, cs} ->
+        Logger.error("[ShowLive] TLS save failed: #{inspect(cs.errors)}")
+        {:noreply, assign(socket, :tls_form, to_form(cs))}
+    end
+  end
+
+  def handle_event("save_alert", %{"channel" => params}, socket) do
+    case Channels.update_channel(socket.assigns.channel, params) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> assign(:channel, updated)
+         |> assign(:alert_form, to_form(Channels.Channel.changeset(updated, %{})))
+         |> put_flash(:info, "Alert configuration saved.")}
+
+      {:error, cs} ->
+        {:noreply, assign(socket, :alert_form, to_form(cs))}
+    end
+  end
+
+  def handle_event("edit_tls_key", _, socket) do
+    {:noreply, assign(socket, :tls_key_editing, true)}
+  end
+
   @impl true
   def render(assigns) do
     assigns = assign(assigns, :adapter_labels, @adapter_labels)
@@ -216,8 +292,10 @@ defmodule JoyWeb.Channels.ShowLive do
             <div>
               <div class="flex items-center gap-2">
                 <h2 class="text-xl font-bold">{@channel.name}</h2>
-                <span :if={@running?} class="badge badge-success">Running</span>
-                <span :if={!@running?} class="badge badge-ghost">Stopped</span>
+                <span :if={@running? and not @channel.paused} class="badge badge-success">Running</span>
+                <span :if={@running? and @channel.paused} class="badge badge-warning">Paused</span>
+                <span :if={not @running?} class="badge badge-ghost">Stopped</span>
+                <span :if={@channel.tls_enabled} class="badge badge-info badge-sm">TLS</span>
               </div>
               <p class="text-sm text-base-content/60 mt-0.5">
                 MLLP port {@channel.mllp_port}
@@ -228,18 +306,35 @@ defmodule JoyWeb.Channels.ShowLive do
               <.link navigate={~p"/channels/#{@channel.id}/messages"} class="btn btn-ghost btn-sm">
                 <.icon name="hero-queue-list" class="w-4 h-4" /> Messages
               </.link>
-              <button :if={!@running?} phx-click="start_channel" class="btn btn-success btn-sm">Start</button>
+              <button :if={not @running?} phx-click="start_channel" class="btn btn-success btn-sm">Start</button>
+              <button :if={@running? and not @channel.paused} phx-click="pause_channel"
+                      class="btn btn-warning btn-sm">Pause</button>
+              <button :if={@running? and @channel.paused} phx-click="resume_channel"
+                      class="btn btn-success btn-sm">Resume</button>
               <button :if={@running?} phx-click="stop_channel" class="btn btn-ghost btn-sm">Stop</button>
             </div>
           </div>
 
-          <div :if={@running?} class="flex gap-6 mt-4 pt-4 border-t border-base-300 text-sm">
+          <%!-- Today's stats + session stats --%>
+          <div :if={@running?} class="flex gap-6 mt-4 pt-4 border-t border-base-300 text-sm flex-wrap">
             <div>
-              <span class="text-base-content/50">Processed</span>
-              <span class="ml-2 font-semibold text-success">{@stats.processed_count}</span>
+              <span class="text-base-content/50 text-xs uppercase tracking-wide">Today Recv</span>
+              <span class="ml-2 font-semibold">{@stats[:today_received] || 0}</span>
             </div>
             <div>
-              <span class="text-base-content/50">Failed</span>
+              <span class="text-base-content/50 text-xs uppercase tracking-wide">Today Proc</span>
+              <span class="ml-2 font-semibold text-success">{@stats[:today_processed] || 0}</span>
+            </div>
+            <div>
+              <span class="text-base-content/50 text-xs uppercase tracking-wide">Today Fail</span>
+              <span class="ml-2 font-semibold text-error">{@stats[:today_failed] || 0}</span>
+            </div>
+            <div>
+              <span class="text-base-content/50 text-xs uppercase tracking-wide">Queue Depth</span>
+              <span class="ml-2 font-semibold">{@stats[:retry_queue_depth] || 0}</span>
+            </div>
+            <div>
+              <span class="text-base-content/50 text-xs uppercase tracking-wide">Session Fail</span>
               <span class="ml-2 font-semibold text-error">{@stats.failed_count}</span>
             </div>
           </div>
@@ -327,41 +422,222 @@ defmodule JoyWeb.Channels.ShowLive do
           </div>
         </div>
       </div>
-    </div>
 
-    <%!-- IP Allowlist --%>
-    <div class="card bg-base-100 border border-base-300">
-      <div class="card-body p-5">
-        <h3 class="font-semibold mb-1">IP Allowlist</h3>
-        <p class="text-sm text-base-content/50 mb-4">
-          Restrict inbound MLLP connections to specific addresses. Accepts plain IPs
-          (<code class="font-mono">10.0.0.5</code>) or CIDR ranges
-          (<code class="font-mono">10.0.0.0/24</code>). Empty = accept from any IP.
-          Changes apply to new connections immediately; existing connections are unaffected.
-        </p>
+      <%!-- IP Allowlist --%>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-5">
+          <h3 class="font-semibold mb-1">IP Allowlist</h3>
+          <p class="text-sm text-base-content/50 mb-4">
+            Restrict inbound MLLP connections to specific addresses. Accepts plain IPs
+            (<code class="font-mono">10.0.0.5</code>) or CIDR ranges
+            (<code class="font-mono">10.0.0.0/24</code>). Empty = accept from any IP.
+            Changes apply to new connections immediately; existing connections are unaffected.
+          </p>
 
-        <div :if={@channel.allowed_ips == []} class="text-sm text-base-content/40 py-1 mb-3">
-          No restrictions — accepting connections from any IP.
-        </div>
-
-        <div :if={@channel.allowed_ips != []} class="space-y-1 mb-4">
-          <div :for={ip <- @channel.allowed_ips} class="flex items-center gap-2">
-            <span class="font-mono text-sm flex-1">{ip}</span>
-            <button phx-click="remove_allowed_ip" phx-value-ip={ip}
-                    class="btn btn-ghost btn-xs text-error">
-              <.icon name="hero-x-mark" class="w-3.5 h-3.5" />
-            </button>
+          <div :if={@channel.allowed_ips == []} class="text-sm text-base-content/40 py-1 mb-3">
+            No restrictions — accepting connections from any IP.
           </div>
-        </div>
 
-        <form phx-submit="add_allowed_ip" class="flex gap-2">
-          <input type="text" name="ip" class="input input-bordered input-sm flex-1"
-                 placeholder="192.168.1.0/24 or 10.0.0.5" />
-          <button type="submit" class="btn btn-sm btn-ghost">
-            <.icon name="hero-plus" class="w-4 h-4" /> Add
-          </button>
-        </form>
-        <p :if={@ip_error} class="text-error text-xs mt-1">{@ip_error}</p>
+          <div :if={@channel.allowed_ips != []} class="space-y-1 mb-4">
+            <div :for={ip <- @channel.allowed_ips} class="flex items-center gap-2">
+              <span class="font-mono text-sm flex-1">{ip}</span>
+              <button phx-click="remove_allowed_ip" phx-value-ip={ip}
+                      class="btn btn-ghost btn-xs text-error">
+                <.icon name="hero-x-mark" class="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          <form phx-submit="add_allowed_ip" class="flex gap-2">
+            <input type="text" name="ip" class="input input-bordered input-sm flex-1"
+                   placeholder="192.168.1.0/24 or 10.0.0.5" />
+            <button type="submit" class="btn btn-sm btn-ghost">
+              <.icon name="hero-plus" class="w-4 h-4" /> Add
+            </button>
+          </form>
+          <p :if={@ip_error} class="text-error text-xs mt-1">{@ip_error}</p>
+        </div>
+      </div>
+
+      <%!-- TLS Configuration --%>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-5">
+          <h3 class="font-semibold mb-1">TLS Configuration</h3>
+          <p class="text-sm text-base-content/50 mb-4">
+            Enable TLS to encrypt MLLP traffic in transit. Paste PEM-encoded certificate
+            material below — cert material is stored encrypted in the database (no file paths needed).
+            Saving restarts the channel to apply the new config.
+          </p>
+
+          <%!-- Cert expiry warning --%>
+          <% cert_info = Joy.CertParser.parse(@channel.tls_cert_pem) %>
+          <div :if={match?({:ok, %{expires_at: _}}, cert_info)} class="mb-4">
+            <% {:ok, %{expires_at: exp_dt, cn: cn, issuer: issuer, sans: sans}} = cert_info %>
+            <% days_left = DateTime.diff(exp_dt, DateTime.utc_now(), :day) %>
+            <div class={"alert text-sm py-2 #{if days_left <= 30, do: "alert-warning", else: "alert-info"}"}>
+              <div>
+                <p class="font-medium">
+                  {if cn, do: cn, else: "(no CN)"}
+                  <span class="font-normal opacity-70 ml-2">issued by {issuer || "unknown"}</span>
+                </p>
+                <p class="text-xs mt-0.5">
+                  SANs: {if sans == [], do: "none", else: Enum.join(sans, ", ")}
+                </p>
+                <p class="text-xs mt-0.5">
+                  Expires: {Calendar.strftime(exp_dt, "%Y-%m-%d")}
+                  ({days_left} day{if days_left == 1, do: "", else: "s"} remaining)
+                  ({if days_left <= 0, do: "⚠ EXPIRED", else: if(days_left <= 30, do: "— renew soon", else: "")})
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <.form :if={@tls_form} for={@tls_form} phx-submit="save_tls" class="space-y-4">
+            <div class="form-control">
+              <label class="label cursor-pointer justify-start gap-3">
+                <input type="checkbox" class="toggle toggle-sm toggle-info"
+                       name="channel[tls_enabled]" value="true"
+                       checked={@channel.tls_enabled} />
+                <span class="label-text">Enable TLS</span>
+              </label>
+            </div>
+
+            <div class="grid grid-cols-1 gap-3">
+              <%!-- Server Certificate (public — shown freely) --%>
+              <div class="form-control">
+                <div class="label">
+                  <span class="label-text">Server Certificate (PEM)</span>
+                  <button :if={@channel.tls_cert_pem && @channel.tls_cert_pem != ""}
+                          type="button"
+                          onclick={"navigator.clipboard.writeText(document.getElementById('tls-cert-display').value)
+                                   .then(() => { this.textContent = 'Copied!'; setTimeout(() => this.textContent = 'Copy cert', 2000); })"}
+                          class="btn btn-xs btn-ghost">
+                    Copy cert
+                  </button>
+                </div>
+                <textarea
+                  id="tls-cert-display"
+                  class="textarea textarea-bordered font-mono text-xs h-32 resize-y"
+                  name="channel[tls_cert_pem]"
+                  placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                >{@channel.tls_cert_pem}</textarea>
+                <p :for={msg <- Enum.map(@tls_form[:tls_cert_pem].errors, &translate_error/1)}
+                   class="mt-1 text-sm text-error flex gap-1 items-center">
+                  <.icon name="hero-exclamation-circle" class="size-4 shrink-0" />{msg}
+                </p>
+                <p class="text-xs text-base-content/50 mt-1">
+                  Share this certificate with connecting systems that need to verify Joy's identity.
+                </p>
+              </div>
+
+              <%!-- Private Key (write-only after initial save) --%>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Private Key (PEM)</span></label>
+                <div :if={@channel.tls_key_pem && not @tls_key_editing} class="flex items-center gap-3 p-3 bg-base-200 rounded-lg">
+                  <.icon name="hero-lock-closed" class="w-4 h-4 text-success shrink-0" />
+                  <span class="text-sm flex-1">Private key is configured</span>
+                  <button type="button" phx-click="edit_tls_key" class="btn btn-xs btn-ghost">Replace</button>
+                </div>
+                <textarea
+                  :if={is_nil(@channel.tls_key_pem) or @tls_key_editing}
+                  class="textarea textarea-bordered font-mono text-xs h-32 resize-y"
+                  name="channel[tls_key_pem]"
+                  placeholder={"-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----"}
+                ></textarea>
+                <p :for={msg <- Enum.map(@tls_form[:tls_key_pem].errors, &translate_error/1)}
+                   class="mt-1 text-sm text-error flex gap-1 items-center">
+                  <.icon name="hero-exclamation-circle" class="size-4 shrink-0" />{msg}
+                </p>
+                <p :if={is_nil(@channel.tls_key_pem) or @tls_key_editing}
+                   class="text-xs text-base-content/50 mt-1">
+                  Stored encrypted. Never shown again after saving.
+                </p>
+              </div>
+
+              <%!-- CA Certificate (optional — mutual TLS) --%>
+              <div class="form-control">
+                <label class="label">
+                  <span class="label-text">CA Certificate (PEM) — optional, mutual TLS only</span>
+                </label>
+                <textarea
+                  class="textarea textarea-bordered font-mono text-xs h-24 resize-y"
+                  name="channel[tls_ca_cert_pem]"
+                  placeholder={"-----BEGIN CERTIFICATE-----\n(CA cert from connecting health system)\n-----END CERTIFICATE-----"}
+                >{@channel.tls_ca_cert_pem}</textarea>
+                <p class="text-xs text-base-content/50 mt-1">
+                  Only needed when requiring clients to present a certificate (mTLS).
+                  Provide the CA certificate of the connecting system.
+                </p>
+              </div>
+
+              <div class="form-control">
+                <label class="label cursor-pointer justify-start gap-3">
+                  <input type="checkbox" class="toggle toggle-sm"
+                         name="channel[tls_verify_peer]" value="true"
+                         checked={@channel.tls_verify_peer} />
+                  <span class="label-text">Require client certificate (mutual TLS)</span>
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <button type="submit" class="btn btn-sm btn-primary">Save TLS Config</button>
+            </div>
+          </.form>
+        </div>
+      </div>
+
+      <%!-- Alerting --%>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-5">
+          <h3 class="font-semibold mb-1">Alerting</h3>
+          <p class="text-sm text-base-content/50 mb-4">
+            Send an alert when consecutive failures exceed the threshold.
+            Alerts are suppressed during the cooldown window to prevent flooding.
+          </p>
+
+          <.form :if={@alert_form} for={@alert_form} phx-submit="save_alert" class="space-y-4">
+            <div class="form-control">
+              <label class="label cursor-pointer justify-start gap-3">
+                <input type="checkbox" class="toggle toggle-sm toggle-error"
+                       name="channel[alert_enabled]" value="true"
+                       checked={@channel.alert_enabled} />
+                <span class="label-text">Enable alerts</span>
+              </label>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="form-control">
+                <label class="label"><span class="label-text">Consecutive failures threshold</span></label>
+                <input type="number" class="input input-bordered input-sm" min="1"
+                       name="channel[alert_threshold]" value={@channel.alert_threshold} />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text">Cooldown (minutes)</span></label>
+                <input type="number" class="input input-bordered input-sm" min="1"
+                       name="channel[alert_cooldown_minutes]" value={@channel.alert_cooldown_minutes} />
+              </div>
+            </div>
+
+            <div class="form-control">
+              <label class="label"><span class="label-text">Alert email (optional)</span></label>
+              <input type="email" class="input input-bordered input-sm"
+                     name="channel[alert_email]" value={@channel.alert_email}
+                     placeholder="oncall@example.com" />
+            </div>
+
+            <div class="form-control">
+              <label class="label"><span class="label-text">Webhook URL (optional)</span></label>
+              <input type="text" class="input input-bordered input-sm font-mono"
+                     name="channel[alert_webhook_url]" value={@channel.alert_webhook_url}
+                     placeholder="https://hooks.slack.com/..." />
+            </div>
+
+            <div>
+              <button type="submit" class="btn btn-sm btn-primary">Save Alert Config</button>
+            </div>
+          </.form>
+        </div>
       </div>
     </div>
 
@@ -518,5 +794,13 @@ defmodule JoyWeb.Channels.ShowLive do
     </div>
     </Layouts.app>
     """
+  end
+
+  defp default_stats(channel) do
+    %{
+      processed_count: 0, failed_count: 0, last_error: nil, last_message_at: nil,
+      paused: channel.paused, today_received: 0, today_processed: 0, today_failed: 0,
+      retry_queue_depth: 0
+    }
   end
 end

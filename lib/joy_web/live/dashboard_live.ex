@@ -7,6 +7,7 @@ defmodule JoyWeb.DashboardLive do
     channels = Joy.Channels.list_channels()
     channel_stats = load_all_stats(channels)
     recent_errors = Joy.MessageLog.list_recent(nil, limit: 10, status: "failed")
+    total_failed = Joy.MessageLog.count_all_failed()
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Joy.PubSub, "channels")
@@ -20,8 +21,11 @@ defmodule JoyWeb.DashboardLive do
      |> assign(:page_title, "Dashboard")
      |> assign(:channels, channels)
      |> assign(:running_ids, running_ids(channels))
+     |> assign(:paused_ids, paused_ids(channels))
      |> assign(:channel_stats, channel_stats)
-     |> assign(:recent_errors, recent_errors)}
+     |> assign(:recent_errors, recent_errors)
+     |> assign(:total_failed, total_failed)
+     |> assign(:expiring_certs, Joy.Channels.list_tls_expiring_soon(30))}
   end
 
   @impl true
@@ -33,11 +37,21 @@ defmodule JoyWeb.DashboardLive do
   def handle_info({event, _payload}, socket)
       when event in [:channel_created, :channel_deleted] do
     channels = Joy.Channels.list_channels()
-    {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
+    {:noreply,
+     socket
+     |> assign(:channels, channels)
+     |> assign(:running_ids, running_ids(channels))
+     |> assign(:paused_ids, paused_ids(channels))
+     |> assign(:total_failed, Joy.MessageLog.count_all_failed())
+     |> assign(:expiring_certs, Joy.Channels.list_tls_expiring_soon(30))}
   end
 
   def handle_info({:channel_updated, _}, socket) do
-    {:noreply, assign(socket, :channels, Joy.Channels.list_channels())}
+    channels = Joy.Channels.list_channels()
+    {:noreply,
+     socket
+     |> assign(:channels, channels)
+     |> assign(:paused_ids, paused_ids(channels))}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -59,11 +73,25 @@ defmodule JoyWeb.DashboardLive do
     {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, id))}
   end
 
+  def handle_event("pause_channel", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    Joy.ChannelManager.pause_channel(id)
+    {:noreply, assign(socket, :paused_ids, MapSet.put(socket.assigns.paused_ids, id))}
+  end
+
+  def handle_event("resume_channel", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    Joy.ChannelManager.resume_channel(id)
+    {:noreply, assign(socket, :paused_ids, MapSet.delete(socket.assigns.paused_ids, id))}
+  end
+
   defp running_ids(channels) do
     channels
     |> Enum.filter(&Joy.ChannelManager.channel_running?(&1.id))
     |> MapSet.new(& &1.id)
   end
+
+  defp paused_ids(channels), do: channels |> Enum.filter(& &1.paused) |> MapSet.new(& &1.id)
 
   defp load_all_stats(channels) do
     Map.new(channels, fn ch ->
@@ -71,7 +99,9 @@ defmodule JoyWeb.DashboardLive do
         if Joy.ChannelManager.channel_running?(ch.id) do
           Joy.Channel.Pipeline.get_stats(ch.id)
         else
-          %{processed_count: 0, failed_count: 0, last_error: nil, last_message_at: nil}
+          %{processed_count: 0, failed_count: 0, last_error: nil, last_message_at: nil,
+            paused: ch.paused, today_received: 0, today_processed: 0, today_failed: 0,
+            retry_queue_depth: 0}
         end
       {ch.id, stats}
     end)
@@ -84,6 +114,22 @@ defmodule JoyWeb.DashboardLive do
     ~H"""
     <Layouts.app flash={@flash} page_title={@page_title} current_scope={@current_scope}>
     <div class="space-y-6">
+      <%!-- TLS cert expiry warnings --%>
+      <div :if={@expiring_certs != []} class="alert alert-warning">
+        <.icon name="hero-exclamation-triangle" class="w-5 h-5 shrink-0" />
+        <div>
+          <p class="font-medium">TLS certificate expiry warning</p>
+          <p class="text-sm">
+            {length(@expiring_certs)} channel{if length(@expiring_certs) == 1, do: "", else: "s"} have certificates expiring within 30 days:
+            {Enum.map_join(@expiring_certs, ", ", fn ch ->
+              days = if ch.tls_cert_expires_at, do: DateTime.diff(ch.tls_cert_expires_at, DateTime.utc_now(), :day), else: 0
+              "#{ch.name} (#{days}d)"
+            end)}.
+            Update certificates on each channel's settings page.
+          </p>
+        </div>
+      </div>
+
       <%!-- Summary cards --%>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="card bg-base-100 border border-base-300">
@@ -102,16 +148,21 @@ defmodule JoyWeb.DashboardLive do
         </div>
         <div class="card bg-base-100 border border-base-300">
           <div class="card-body py-4 px-5">
-            <p class="text-xs font-medium text-base-content/50 uppercase tracking-wider">Processed</p>
+            <p class="text-xs font-medium text-base-content/50 uppercase tracking-wider">Processed (session)</p>
             <p class="text-3xl font-bold text-base-content mt-1">
-              {@channel_stats |> Map.values() |> Enum.reduce(0, &(&1.processed_count + &2))}
+              {@channel_stats |> Map.values() |> Enum.reduce(0, &((&1[:processed_count] || 0) + &2))}
             </p>
           </div>
         </div>
+        <%!-- Dead Letter Queue widget: total failed messages across all channels --%>
         <div class="card bg-base-100 border border-base-300">
           <div class="card-body py-4 px-5">
-            <p class="text-xs font-medium text-base-content/50 uppercase tracking-wider">Recent Errors</p>
-            <p class="text-3xl font-bold text-error mt-1">{length(@recent_errors)}</p>
+            <p class="text-xs font-medium text-base-content/50 uppercase tracking-wider">Total Failed (DLQ)</p>
+            <div class="flex items-end justify-between mt-1">
+              <p class="text-3xl font-bold text-error">{@total_failed}</p>
+              <.link :if={@total_failed > 0} navigate={~p"/messages/failed"}
+                     class="text-xs text-error/70 underline mb-1">View all</.link>
+            </div>
           </div>
         </div>
       </div>
@@ -136,8 +187,8 @@ defmodule JoyWeb.DashboardLive do
                   <th>Name</th>
                   <th>Port</th>
                   <th>Status</th>
-                  <th>Processed</th>
-                  <th>Failed</th>
+                  <th>Today Recv / Proc / Fail</th>
+                  <th>Session Fail</th>
                   <th class="text-right">Actions</th>
                 </tr>
               </thead>
@@ -151,19 +202,34 @@ defmodule JoyWeb.DashboardLive do
                   </td>
                   <td><span class="font-mono text-sm">{ch.mllp_port}</span></td>
                   <td>
-                    <span :if={ch.id in @running_ids} class="badge badge-success badge-sm gap-1">
+                    <span :if={ch.id in @running_ids and ch.id not in @paused_ids}
+                          class="badge badge-success badge-sm gap-1">
                       <span class="w-1.5 h-1.5 rounded-full bg-success-content animate-pulse"></span>
                       Running
                     </span>
+                    <span :if={ch.id in @running_ids and ch.id in @paused_ids}
+                          class="badge badge-warning badge-sm">Paused</span>
                     <span :if={ch.id not in @running_ids} class="badge badge-ghost badge-sm">Stopped</span>
                   </td>
-                  <td class="text-sm font-medium text-success">{@channel_stats[ch.id][:processed_count] || 0}</td>
+                  <td class="text-sm font-mono">
+                    <span class="text-base-content/60">{@channel_stats[ch.id][:today_received] || 0}</span>
+                    <span class="text-base-content/30 mx-0.5">/</span>
+                    <span class="text-success">{@channel_stats[ch.id][:today_processed] || 0}</span>
+                    <span class="text-base-content/30 mx-0.5">/</span>
+                    <span class="text-error">{@channel_stats[ch.id][:today_failed] || 0}</span>
+                  </td>
                   <td class="text-sm font-medium text-error">{@channel_stats[ch.id][:failed_count] || 0}</td>
                   <td>
                     <div class="flex items-center justify-end gap-1">
                       <button :if={ch.id not in @running_ids}
                               phx-click="start_channel" phx-value-id={ch.id}
                               class="btn btn-ghost btn-xs text-success">Start</button>
+                      <button :if={ch.id in @running_ids and ch.id not in @paused_ids}
+                              phx-click="pause_channel" phx-value-id={ch.id}
+                              class="btn btn-ghost btn-xs text-warning">Pause</button>
+                      <button :if={ch.id in @running_ids and ch.id in @paused_ids}
+                              phx-click="resume_channel" phx-value-id={ch.id}
+                              class="btn btn-ghost btn-xs text-success">Resume</button>
                       <button :if={ch.id in @running_ids}
                               phx-click="stop_channel" phx-value-id={ch.id}
                               class="btn btn-ghost btn-xs text-error">Stop</button>
@@ -179,7 +245,13 @@ defmodule JoyWeb.DashboardLive do
 
       <%!-- Recent errors --%>
       <div :if={@recent_errors != []}>
-        <h2 class="text-sm font-semibold text-base-content/60 uppercase tracking-wider mb-3">Recent Errors</h2>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-semibold text-base-content/60 uppercase tracking-wider">Recent Errors</h2>
+          <.link :if={@total_failed > 10} navigate={~p"/messages/failed"}
+                 class="text-xs text-error underline">
+            View all {@total_failed} failed messages
+          </.link>
+        </div>
         <div class="card bg-base-100 border border-base-300 overflow-hidden">
           <div class="overflow-x-auto">
             <table class="table table-sm">

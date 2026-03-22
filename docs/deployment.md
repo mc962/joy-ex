@@ -62,6 +62,9 @@ These must be set at runtime (not baked into the image). Store them as secrets i
 | `PORT` | `4000` | HTTP port |
 | `POOL_SIZE` | `10` | Ecto DB connection pool size per node. Total connections = `POOL_SIZE × num_nodes`. |
 | `ECTO_IPV6` | unset | Set to `true` to connect to the database over IPv6 |
+| `SMTP_HOST` | unset | SMTP relay hostname for email alerting (requires Swoosh SMTP adapter config) |
+| `SMTP_USER` | unset | SMTP username |
+| `SMTP_PASS` | unset | SMTP password |
 
 ---
 
@@ -283,7 +286,41 @@ During the health check window (~10–30 seconds depending on your NLB settings)
 
 **For environments without a load balancer (single node, small bare metal setups):** Upstream senders connect directly to the node IP. This is simpler but means if that node dies, senders need to reconnect to a different IP. This can be managed with DNS (a per-channel DNS A record that you update on failover), a floating IP, or by accepting that a short reconnect delay is acceptable given your upstream retry behavior.
 
-**MLLP is not encrypted.** The MLLP protocol does not support TLS natively. HL7 messages sent over MLLP travel in plaintext. If the network path between your upstream system and Joy is not fully trusted (e.g., traverses the public internet or a shared network), use a VPN tunnel or an IPsec connection to encrypt the path. Within a private VPC/private network segment, plain MLLP is standard practice.
+**MLLP TLS is supported.** Each channel can be configured to require TLS on its MLLP port. Certificate material (server cert, private key, and optional CA cert for mutual TLS) is stored as PEM content directly in the database — encrypted at rest for the private key. No filesystem cert management or volume mounts are needed.
+
+### Configuring TLS on a channel
+
+1. On the channel settings page, enable TLS and paste your PEM-encoded cert material into the appropriate fields.
+2. The private key is write-only: after saving it is never redisplayed. A "Replace" button allows updating it.
+3. After saving, the channel page shows the cert's CN, issuer, SANs, and expiry date.
+4. Saving restarts the channel automatically to apply the new socket configuration.
+
+### Generating a cert for local development
+
+```sh
+# Phoenix ships with a self-signed cert generator:
+mix phx.gen.cert
+# Produces priv/cert.pem and priv/key.pem
+# Paste these into the TLS config form. The MLLP test client uses verify:verify_none,
+# so self-signed certs work without OS trust store configuration.
+```
+
+### Production cert options
+
+| Scenario | Recommended approach |
+|---|---|
+| Internal network, single operator | Self-signed cert + distribute cert PEM to connecting systems |
+| Internal PKI (Vault, step-ca, AD CS) | Issue cert from your CA; connecting systems trust your CA already |
+| Health system integration | They issue a cert from their PKI, or you use a public CA cert (DigiCert, Sectigo) on a routable hostname |
+| Public hostname | Let's Encrypt via certbot (ACME) — auto-renewed, universally trusted |
+
+For mutual TLS (health system presents a client cert): paste their CA certificate into the "CA Certificate" field and enable "Require client certificate."
+
+### Cert expiry monitoring
+
+Joy monitors TLS cert expiry automatically. A warning banner appears on the dashboard and channel page when a cert expires within 30 days. If alerting is enabled on the channel, an email/webhook alert fires on the daily check cycle.
+
+**Plain MLLP (no TLS):** If TLS is not enabled on a channel, HL7 messages travel in plaintext. Within a fully trusted private VPC or private network segment this is standard practice. If the network path traverses untrusted segments, enable TLS per-channel or use a VPN/IPsec tunnel to encrypt the path.
 
 ---
 
@@ -324,6 +361,27 @@ This key encrypts destination credentials (API keys, MLLP passwords, webhook sec
 - All routes require authentication. Users must be explicitly promoted to admin (`mix joy.make_admin`) before accessing anything. Self-registered users cannot see the application.
 - Use HTTPS. Configure a reverse proxy (nginx, ALB) to terminate TLS and proxy to Joy's port 4000. See the commented `https:` block in `config/runtime.exs` for terminating TLS directly in Joy if preferred.
 - Set `PHX_HOST` to your actual hostname to prevent host header injection.
+
+### Alerting (email and webhooks)
+
+Joy can alert on sustained channel failures via email and/or HTTP webhooks. Both are configured per-channel in the UI. No global config is required to use webhooks — Joy uses `Req` to POST JSON to the configured URL.
+
+For **email alerts**, you must configure a Swoosh mailer adapter. By default Joy ships with the Swoosh local adapter (dev only). For production, add a `config/runtime.exs` block such as:
+
+```elixir
+config :joy, Joy.Mailer,
+  adapter: Swoosh.Adapters.SMTP,
+  relay: System.get_env("SMTP_HOST"),
+  port: 587,
+  username: System.get_env("SMTP_USER"),
+  password: System.get_env("SMTP_PASS"),
+  tls: :if_available,
+  auth: :always
+```
+
+Supported adapters include Postmark, SendGrid, Mailgun, and others — see the [Swoosh documentation](https://hexdocs.pm/swoosh/) for the full list.
+
+Per-channel alert settings (threshold, cooldown, email address, webhook URL) are configured on the channel's settings page. Alerts fire when `alert_threshold` consecutive failures occur, with a cooldown of `alert_cooldown_minutes` between alert deliveries.
 
 ### Firewall / security group rules
 

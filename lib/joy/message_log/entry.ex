@@ -8,6 +8,9 @@ defmodule Joy.MessageLog.Entry do
   The unique index on (channel_id, message_control_id) provides exactly-once
   semantics via upsert-on-conflict. No updated_at — entries are append-mostly.
 
+  message_type and patient_id are extracted at persist time from MSH.9 and PID.3
+  to enable efficient filtering without scanning raw_hl7.
+
   # GO-TRANSLATION:
   # struct with database/sql scanning. Upsert-on-conflict is standard SQL.
   """
@@ -28,13 +31,17 @@ defmodule Joy.MessageLog.Entry do
     field :processed_at, :utc_datetime
     field :inserted_at, :utc_datetime
 
+    # Search fields (item 6) — extracted from MSH.9 and PID.3 at persist time
+    field :message_type, :string
+    field :patient_id, :string
+
     belongs_to :channel, Joy.Channels.Channel
   end
 
   @doc "Changeset for inserting new pending entries."
   def insert_changeset(entry, attrs) do
     entry
-    |> cast(attrs, [:channel_id, :message_control_id, :raw_hl7, :status])
+    |> cast(attrs, [:channel_id, :message_control_id, :raw_hl7, :status, :message_type, :patient_id])
     |> validate_required([:channel_id, :raw_hl7])
     |> put_change(:inserted_at, DateTime.utc_now() |> DateTime.truncate(:second))
     |> put_change(:status, "pending")

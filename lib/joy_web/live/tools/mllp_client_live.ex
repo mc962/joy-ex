@@ -46,6 +46,8 @@ defmodule JoyWeb.Tools.MllpClientLive do
      |> assign(:active_tab, :send)
      |> assign(:host, "localhost")
      |> assign(:port, to_string(default_port))
+     |> assign(:tls, false)
+     |> assign(:tls_verify, true)
      |> assign(:samples, samples)
      |> assign(:hl7_message, samples["ADT^A01"])
      # Send tab
@@ -69,6 +71,11 @@ defmodule JoyWeb.Tools.MllpClientLive do
     {:noreply, assign(socket, :active_tab, String.to_existing_atom(tab))}
   end
 
+  def handle_event("update_tls", params, socket) do
+    {:noreply, socket
+     |> assign(:tls, bool_param(params["tls"]))
+     |> assign(:tls_verify, bool_param(params["tls_verify"]))}
+  end
   def handle_event("update_field", %{"field" => field, "value" => value}, socket) do
     {:noreply, assign(socket, String.to_existing_atom(field), value)}
   end
@@ -81,6 +88,9 @@ defmodule JoyWeb.Tools.MllpClientLive do
     end
   end
 
+  def handle_event("select_channel", %{"port" => port, "tls" => tls}, socket) do
+    {:noreply, socket |> assign(:port, port) |> assign(:tls, tls == "true")}
+  end
   def handle_event("select_channel", %{"port" => port}, socket) do
     {:noreply, assign(socket, :port, port)}
   end
@@ -90,14 +100,18 @@ defmodule JoyWeb.Tools.MllpClientLive do
   end
 
   def handle_event("send_message", _params, socket) do
+    require Logger
     with {:ok, _} <- validate_hl7(socket.assigns.hl7_message),
          {:ok, port} <- parse_port(socket.assigns.port) do
       host = socket.assigns.host
       hl7 = socket.assigns.hl7_message
 
+      tls        = socket.assigns.tls
+      tls_verify = socket.assigns.tls_verify
+      Logger.debug("[MllpClient] send tls=#{tls} tls_verify=#{tls_verify} to #{host}:#{port}")
       task =
         Task.Supervisor.async_nolink(Joy.TransformSupervisor, fn ->
-          Joy.MLLP.Client.send_message(host, port, hl7)
+          Joy.MLLP.Client.send_message(host, port, hl7, tls: tls, tls_verify: tls_verify)
         end)
 
       {:noreply,
@@ -120,10 +134,12 @@ defmodule JoyWeb.Tools.MllpClientLive do
       message_type = @stress_message_types[socket.assigns.stress_message_type] || :adt_a01
       caller = self()
 
+      tls        = socket.assigns.tls
+      tls_verify = socket.assigns.tls_verify
       task =
         Task.Supervisor.async_nolink(Joy.TransformSupervisor, fn ->
           Joy.MLLP.StressTest.run(caller, host, port, message_type, count, concurrency,
-            delay_ms: delay_ms
+            delay_ms: delay_ms, tls: tls, tls_verify: tls_verify
           )
         end)
 
@@ -218,6 +234,12 @@ defmodule JoyWeb.Tools.MllpClientLive do
     if trimmed == "", do: {:error, "HL7 message is empty"}, else: {:ok, trimmed}
   end
 
+  # Hidden input sends "false", checked checkbox appends "true" → list ["false", "true"].
+  # Unchecked sends only the hidden value "false".
+  defp bool_param(list) when is_list(list), do: "true" in list
+  defp bool_param("true"), do: true
+  defp bool_param(_), do: false
+
   defp parse_port(s) do
     case Integer.parse(String.trim(s)) do
       {n, ""} when n > 0 and n < 65536 -> {:ok, n}
@@ -288,12 +310,29 @@ defmodule JoyWeb.Tools.MllpClientLive do
                   :if={ch.mllp_port}
                   phx-click="select_channel"
                   phx-value-port={ch.mllp_port}
+                  phx-value-tls={if ch.tls_enabled, do: "true", else: "false"}
                   class={"btn btn-xs #{if to_string(ch.mllp_port) == @port, do: "btn-primary", else: "btn-ghost border border-base-300"}"}
                 >
-                  {ch.name} :{ch.mllp_port}
+                  {ch.name} :{ch.mllp_port}{if ch.tls_enabled, do: " 🔒", else: ""}
                 </button>
               </div>
             </div>
+            <form phx-change="update_tls" class="flex items-center gap-3">
+              <label class="label cursor-pointer justify-start gap-2 py-0">
+                <input type="hidden" name="tls" value="false" />
+                <input type="checkbox" class="toggle toggle-xs toggle-info"
+                       name="tls" value="true" checked={@tls} />
+                <span class="label-text text-xs text-base-content/60">TLS</span>
+                <span :if={@tls} class="badge badge-info badge-xs">on</span>
+              </label>
+              <label class="label cursor-pointer justify-start gap-2 py-0">
+                <input type="hidden" name="tls_verify" value="false" />
+                <input type="checkbox" class="toggle toggle-xs toggle-warning"
+                       name="tls_verify" value="true" checked={@tls_verify} />
+                <span class="label-text text-xs text-base-content/60">Verify cert</span>
+                <span :if={not @tls_verify} class="badge badge-warning badge-xs">verify_none</span>
+              </label>
+            </form>
           </div>
         </div>
       </div>

@@ -6,7 +6,9 @@ This document covers specific implementation decisions in Joy: why something was
 
 - [MLLP Framing and Leniency](#mllp-framing-and-leniency)
 - [TCP Connection Model](#tcp-connection-model)
+- [MLLP TLS: Transport Abstraction](#mllp-tls-transport-abstraction)
 - [Pipeline Serialization](#pipeline-serialization)
+- [Channel Pause/Resume](#channel-pauseresume)
 - [At-Least-Once Delivery: Full Details](#at-least-once-delivery-full-details)
 - [Registry Key Design](#registry-key-design)
 - [ChannelManager vs ChannelSupervisor](#channelmanager-vs-channelsupervisor)
@@ -19,6 +21,9 @@ This document covers specific implementation decisions in Joy: why something was
 - [Encrypted Ecto Type](#encrypted-ecto-type)
 - [Retry: Backoff Formula and Placement](#retry-backoff-formula-and-placement)
 - [Horde: Deduplication and Startup Race](#horde-deduplication-and-startup-race)
+- [ChannelStats: ETS Design](#channelstats-ets-design)
+- [Alerting: Consecutive Failure Detection](#alerting-consecutive-failure-detection)
+- [Message Search: Extract at Persist Time](#message-search-extract-at-persist-time)
 - [Sinks: Design as a Test Tool](#sinks-design-as-a-test-tool)
 - [Known Gaps](#known-gaps)
 
@@ -78,6 +83,58 @@ The connection uses `:inet.setopts(socket, active: true)`, which means TCP data 
 
 ---
 
+## MLLP TLS: Transport Abstraction
+
+### Why not Ranch or a TLS proxy?
+
+The ROADMAP mentioned Ranch as a possible approach. Ranch was not used because the existing MLLP server already used raw `:gen_tcp` directly, and introducing Ranch would have required restructuring the accept loop substantially. Instead, TLS is layered in by carrying a **transport atom** (`:gen_tcp` or `:ssl`) through the server/connection boundary and dispatching all socket operations through it.
+
+### The transport atom pattern
+
+`Joy.MLLP.Server` checks `channel.tls_enabled` in `init/1` and calls either `:gen_tcp.listen/2` or `:ssl.listen/2`. For TLS, the accept loop has two phases:
+
+```elixir
+{:ok, socket} = :ssl.transport_accept(listen_socket)  # wait for TCP connection
+{:ok, tls_socket} = :ssl.handshake(socket)             # upgrade to TLS
+```
+
+The transport atom and the live socket are passed together to `Joy.MLLP.Connection.start_link/1`. The Connection carries the transport in its state and uses it for every socket operation:
+
+```elixir
+# set active mode
+:gen_tcp.setopts(socket, active: true)   # plain TCP
+:ssl.setopts(socket, active: true)       # TLS
+
+# send
+:gen_tcp.send(socket, data)
+:ssl.send(socket, data)
+```
+
+Active-mode messages differ by transport — `:tcp` tuple vs `:ssl` tuple — so the Connection has separate `handle_info` clauses for each.
+
+### PEM stored in DB, not file paths
+
+Cert material is stored as PEM text in the database rather than as filesystem paths. This makes the deployment story simpler — no volume mounts in Docker, no cert files to manage on the server, no breakage when a container is replaced.
+
+The private key is stored via `Joy.Encrypted.StringType`, an Ecto type that encrypts/decrypts the raw PEM string using the same AES-256-GCM scheme as destination credentials. The server cert and CA cert are public data and stored as plain text.
+
+`listen_opts/1` decodes PEM to DER at channel start time using `:public_key.pem_decode/1`:
+
+```elixir
+[{:Certificate, cert_der, _} | _] = :public_key.pem_decode(channel.tls_cert_pem)
+[{key_type, key_der, _} | _] = :public_key.pem_decode(channel.tls_key_pem)
+# :ssl accepts :cert (DER binary) and :key ({type, DER binary})
+opts = [cert: cert_der, key: {key_type, key_der}, ...]
+```
+
+`key_type` is whatever the PEM header says — `:RSAPrivateKey`, `:ECPrivateKey`, or `:PrivateKeyInfo` (PKCS#8) — and `:ssl` accepts all three. This means RSA, ECDSA, and PKCS#8-wrapped keys all work without special handling.
+
+### Restarting the channel on TLS config change
+
+TLS options are baked into the listening socket at `listen/2` time. Changing cert paths or toggling `tls_enabled` while a channel is running would have no effect on the existing socket. The `save_tls` event in `ShowLive` therefore restarts the channel (stop + start) immediately after updating the DB record, so the new TLS config takes effect.
+
+---
+
 ## Pipeline Serialization
 
 Each channel's Pipeline GenServer processes one message at a time, sequentially. This is a deliberate match with MLLP's own flow control: MLLP senders wait for an ACK before sending the next message. A sender on a single connection is already serialized at the protocol level. Multiple concurrent connections to the same channel each get their own Connection process, but all dispatch to the same Pipeline via `GenServer.cast`. The Pipeline mailbox queues these and processes them in arrival order.
@@ -85,6 +142,30 @@ Each channel's Pipeline GenServer processes one message at a time, sequentially.
 **Why not a pool of Pipeline workers?** The gains would be marginal. Each channel's MLLP port accepts connections from upstream systems that themselves serialize sends. Parallelism within a channel would primarily help when a destination is slow (e.g., an HTTP webhook timing out), but destinations run synchronously in the Pipeline — a slow destination blocks the Pipeline. This is another known gap: see [Known Gaps](#known-gaps).
 
 The pipeline re-fetches each message entry from the database by ID (`Joy.MessageLog.get_entry!/1`) rather than using the original message struct dispatched by the Connection. This ensures correctness during crash recovery: the requeued messages on startup also go through the same fetch path.
+
+---
+
+## Channel Pause/Resume
+
+### Design goal
+
+Pausing a channel should stop message *processing* without stopping message *ingestion*. Upstream systems keep sending; messages are persisted and ACK'd as normal; nothing is lost. The pipeline just doesn't forward them to destinations until resumed.
+
+### Implementation
+
+`paused` is a boolean on the `channels` table. The Pipeline GenServer carries a `paused` field in its state. When paused:
+
+- `handle_cast({:process, _entry_id}, %{paused: true} = state)` — returns `{:noreply, state}` immediately without processing. The entry stays `:pending` in the database.
+- `handle_cast({:set_paused, true}, state)` — sets `paused: true` and logs.
+- The MLLP.Connection is entirely unaffected — it continues accepting connections, persisting messages, and sending ACKs.
+
+On resume:
+
+- `handle_cast({:set_paused, false}, state)` — sets `paused: false`, then calls `Joy.MessageLog.list_pending(channel_id)` to enumerate all `:pending` entries accumulated while paused, and dispatches each via `process_async/1`. This is the same code path used during startup recovery.
+
+### Why not stop the Pipeline GenServer?
+
+Stopping the Pipeline would require coordinating across the `ChannelSupervisor` tree and would prevent restarting it cleanly. The cast no-op approach is simpler: it adds a single guard clause to the pipeline's hot path and uses the existing startup requeue logic for recovery. No new code paths — just a boolean check.
 
 ---
 
@@ -367,6 +448,99 @@ Both `Horde.Registry` and `Horde.DynamicSupervisor` are started with `members: :
 
 ---
 
+## ChannelStats: ETS Design
+
+### Why ETS instead of DB counters?
+
+Each inbound message increments at least one counter (received). Each processed message increments two (processed or failed). At any meaningful throughput these are very frequent writes. Incrementing DB rows for every message would create heavy write contention on the `channels` table. ETS provides lock-free atomic counter operations (`update_counter/3`) with microsecond latency.
+
+The trade-off: ETS is node-local and lost on restart. The stats are labeled "Today" throughout the UI — transient, operational visibility, not audit records. The message log is the audit record. Losing today's counters on a crash or deploy is acceptable.
+
+### Row format and positional updates
+
+Each row is a 5-tuple: `{channel_id, date, received, processed, failed}`. Erlang's `update_counter/3` uses position indices (1-based in the ETS tuple):
+
+```elixir
+:ets.update_counter(@table, channel_id, {3, 1})  # received (position 3)
+:ets.update_counter(@table, channel_id, {4, 1})  # processed (position 4)
+:ets.update_counter(@table, channel_id, {5, 1})  # failed (position 5)
+```
+
+`update_counter` with a missing key raises. To handle the first increment of the day, `ChannelStats` uses `insert_new/2` with a zero-row as an `init` step, with a guard: if the stored date in position 2 doesn't match today, the row is replaced with a fresh zero-row before incrementing. This is checked lazily on each `incr_*` call — no scheduled reset needed.
+
+### Retry queue depth
+
+`get_today/1` also queries the DB for the count of `:pending` entries for the channel. This is the only DB query in the stats path and is done only when the UI reads stats (not on each message). It gives operators a live view of how backed up the retry queue is.
+
+---
+
+## CertParser and CertMonitor
+
+`Joy.CertParser` uses Erlang's `:public_key.pkix_decode_cert/2` (OTP mode) to extract CN, issuer, SANs, and expiry from a PEM string without any external dependencies. Expiry is parsed from the X.509 `Validity.notAfter` field, which is either `utcTime` (YYMMDDHHMMSSZ, 2-digit year) or `generalTime` (YYYYMMDDHHMMSSZ). The 2-digit year ambiguity is resolved per the X.509 spec: 00–49 maps to 2000–2049, 50–99 maps to 1950–1999. SANs are extracted from the SubjectAltName extension; in OTP decode mode `:public_key` pre-decodes known extensions, so the SAN value is already a list of `{:dNSName, charlist}` tuples rather than a DER blob.
+
+`tls_cert_expires_at` is populated when a cert is saved (in the `save_tls` LiveView event handler) so the database has a queryable datetime without needing to re-parse PEM on every check.
+
+`Joy.CertMonitor` is a GenServer that fires once on startup and then every 24 hours via `Process.send_after`. It queries `Joy.Channels.list_tls_expiring_soon(30)` (a simple DB query against `tls_cert_expires_at`) and calls `Joy.Alerting.send_direct/3` for each channel that has alerting enabled. `send_direct` bypasses the ETS threshold/cooldown mechanism — cert expiry is time-based, not failure-count-based.
+
+---
+
+## Alerting: Consecutive Failure Detection
+
+### ETS state
+
+`Joy.Alerting` maintains an ETS table `{channel_id, consecutive_failures, last_alert_at}`. Rows are created on first failure and reset to 0 on any success:
+
+- `record_failure/1` — increments `consecutive_failures`. If the count reaches `channel.alert_threshold` and the cooldown window has expired, fires an alert and updates `last_alert_at`.
+- `record_success/1` — resets `consecutive_failures` to 0.
+
+### Cooldown enforcement
+
+The cooldown prevents alert storms: if 100 messages in a row fail, you should get one alert per cooldown period, not 96 alerts. The check is:
+
+```elixir
+seconds_since_last = DateTime.diff(DateTime.utc_now(), last_alert_at, :second)
+if seconds_since_last >= channel.alert_cooldown_minutes * 60 do
+  fire_alert(...)
+  update_last_alert_at(channel_id)
+end
+```
+
+`last_alert_at` is stored as a `DateTime` in ETS. On node restart, the ETS table is empty — the cooldown resets. This means a crash followed by immediate restart could fire an alert sooner than expected, but it cannot suppress alerts that should fire.
+
+### Delivery
+
+Two delivery mechanisms, both optional:
+
+- **Email:** `Swoosh.Email.new/1` + `Joy.Mailer.deliver/1`. Uses whatever Swoosh adapter is configured (SMTP, Postmark, SendGrid, etc.). Fires when `channel.alert_email` is set.
+- **Webhook:** `Req.post(url, json: payload)`. JSON payload includes channel ID, name, consecutive failure count, and timestamp. Fires when `channel.alert_webhook_url` is set. Both can be configured simultaneously.
+
+If delivery fails (bad email config, unreachable webhook), the failure is logged but does not crash the Alerting GenServer. Alert delivery is best-effort.
+
+---
+
+## Message Search: Extract at Persist Time
+
+### Why at persist time instead of query time?
+
+The alternative would be to re-parse raw HL7 on every search query — either in the DB (using regex on the `raw_message` column) or in Elixir after a full table scan. Both approaches are expensive and scale poorly.
+
+Extracting at `persist_pending` time costs one additional string operation per inbound message and stores two indexed varchar columns. Queries then become a simple `ilike` on an indexed column.
+
+### Extraction without full HL7 parse
+
+`message_type` is MSH.9 and `patient_id` is PID.3. Both can be extracted with simple string splitting, avoiding the full HL7 parser:
+
+- For MSH.9: split the message on segment delimiter (`\r`), find the `MSH` segment, split on `|`, take index 8, take the first component (up to `^`).
+- For PID.3: find the `PID` segment, split on `|`, take index 3, take the first component.
+
+If either extraction fails (malformed message, segment absent), the field is left `nil` and the message is still persisted. Search just won't match on that field.
+
+### `ilike` substring matching
+
+`list_recent/2` uses PostgreSQL's `ilike` (case-insensitive `like`) with `%term%` wrapping. This supports partial matches: searching for `ADT` matches `ADT^A01^ADT_A01`, and searching for `12345` matches a patient ID like `12345^^^MRN`.
+
+---
+
 ## Sinks: Design as a Test Tool
 
 `Joy.Sinks` is a GenServer holding a `%{sink_name => [entries]}` map in its state. It is intentionally simple:
@@ -385,8 +559,6 @@ The Sink adapter (`Joy.Destinations.Adapters.Sink`) calls `Joy.Sinks.push/2` syn
 These are documented limitations in the current design that are worth knowing about.
 
 **No key rotation for `ENCRYPTION_KEY`:** Rotating the key requires re-encrypting all `destination_configs.config` values. There is no tooling for this. A rotation would need to be done as a custom migration.
-
-**No MLLP TLS:** The MLLP TCP server does not support TLS. Encryption at the transport layer requires a VPN, IPsec, or a TLS-terminating proxy in front of the MLLP port.
 
 **No message log retention:** The `message_log_entries` table grows without bound. Retention policy enforcement requires an external cron job or scheduled database task.
 

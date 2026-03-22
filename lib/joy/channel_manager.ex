@@ -31,6 +31,22 @@ defmodule Joy.ChannelManager do
   @doc "Stop a running channel's OTP tree by id."
   def stop_channel(channel_id), do: GenServer.call(__MODULE__, {:stop_channel, channel_id})
 
+  @doc "Pause a running channel: pipeline stops dispatching; MLLP server keeps accepting."
+  def pause_channel(channel_id) do
+    channel = Joy.Channels.get_channel!(channel_id)
+    {:ok, _updated} = Joy.Channels.set_paused(channel, true)
+    Joy.Channel.Pipeline.set_paused(channel_id, true)
+    :ok
+  end
+
+  @doc "Resume a paused channel: pipeline dispatches again and requeues all pending messages."
+  def resume_channel(channel_id) do
+    channel = Joy.Channels.get_channel!(channel_id)
+    {:ok, _updated} = Joy.Channels.set_paused(channel, false)
+    Joy.Channel.Pipeline.set_paused(channel_id, false)
+    :ok
+  end
+
   @doc "Check if a channel's supervisor process is alive (cluster-wide)."
   def channel_running?(channel_id) do
     case Horde.Registry.lookup(Joy.ChannelRegistry, channel_id) do

@@ -50,6 +50,16 @@ defmodule Joy.Application do
       # Node-local intentionally: transform tasks are ephemeral, not worth distributing.
       {Task.Supervisor, name: Joy.TransformSupervisor},
 
+      # ETS-backed per-channel throughput counters (received/processed/failed today).
+      # Reset on node restart — acceptable for live "today" metrics.
+      Joy.ChannelStats,
+
+      # Tracks consecutive failures per channel; fires email/webhook alerts on threshold.
+      Joy.Alerting,
+
+      # Checks TLS certificate expiry daily; fires alerts for certs expiring within 30 days.
+      Joy.CertMonitor,
+
       # In-memory message sink for testing destinations. Capped ring buffer per
       # named sink; messages are inspectable via the Sinks UI at /tools/sinks.
       Joy.Sinks,

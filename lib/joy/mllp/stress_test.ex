@@ -32,7 +32,7 @@ defmodule Joy.MLLP.StressTest do
           :ok
   def run(caller_pid, host, port, message_type, count, concurrency, opts \\ []) do
     delay_ms = Keyword.get(opts, :delay_ms, 0)
-    client_opts = Keyword.take(opts, [:timeout_ms])
+    client_opts = Keyword.take(opts, [:timeout_ms, :tls, :tls_verify])
 
     results =
       1..count

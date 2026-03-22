@@ -71,6 +71,31 @@ defmodule Joy.Channels do
     |> tap_ok(&broadcast("channel_updated", &1))
   end
 
+  @doc "Set paused flag. Does not signal the pipeline — callers must also call Pipeline.set_paused/2."
+  def set_paused(%Channel{} = channel, paused) when is_boolean(paused) do
+    channel
+    |> Channel.changeset(%{paused: paused})
+    |> Repo.update()
+    |> tap_ok(&broadcast("channel_updated", &1))
+  end
+
+  @doc "Count all :failed message log entries across all channels."
+  def count_failed_messages do
+    Joy.Repo.one(
+      from e in Joy.MessageLog.Entry,
+      where: e.status == "failed",
+      select: count(e.id)
+    )
+  end
+
+  @doc "List TLS-enabled channels whose cert expires within the given number of days."
+  def list_tls_expiring_soon(days) do
+    cutoff = DateTime.add(DateTime.utc_now(), days * 24 * 3600, :second)
+    Channel
+    |> where([c], c.tls_enabled == true and not is_nil(c.tls_cert_expires_at) and c.tls_cert_expires_at <= ^cutoff)
+    |> Repo.all()
+  end
+
   # --- Transform Steps ---
 
   @doc "Create or update a transform step. Pass id in attrs to update."

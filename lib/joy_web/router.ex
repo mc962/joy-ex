@@ -33,6 +33,7 @@ defmodule JoyWeb.Router do
       live "/channels/:id/destinations/new", Channels.ShowLive, :new_destination
       live "/channels/:id/destinations/:dest_id/edit", Channels.ShowLive, :edit_destination
       live "/channels/:id/messages", MessageLog.IndexLive, :index
+      live "/messages/failed", Messages.FailedLive, :index
       live "/users", Users.IndexLive, :index
       live "/tools/mllp-client", Tools.MllpClientLive, :index
       live "/tools/sinks", Tools.SinksLive, :index

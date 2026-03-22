@@ -1,5 +1,5 @@
 defmodule JoyWeb.MessageLog.IndexLive do
-  @moduledoc "Real-time message log viewer for a channel."
+  @moduledoc "Real-time message log viewer for a channel with search and bulk retry."
   use JoyWeb, :live_view
 
   @impl true
@@ -16,7 +16,10 @@ defmodule JoyWeb.MessageLog.IndexLive do
      |> assign(:page_title, "Messages · #{channel.name}")
      |> assign(:channel, channel)
      |> assign(:filter_status, "all")
+     |> assign(:search_type, "")
+     |> assign(:search_patient, "")
      |> assign(:selected_entry, nil)
+     |> assign(:failed_count, count_failed(channel.id))
      |> stream(:entries, entries)}
   end
 
@@ -29,17 +32,32 @@ defmodule JoyWeb.MessageLog.IndexLive do
         socket
       end
 
+    socket =
+      if entry.status == "failed" do
+        update(socket, :failed_count, &(&1 + 1))
+      else
+        socket
+      end
+
     {:noreply, stream_insert(socket, :entries, entry, at: 0)}
   end
   def handle_info(_, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("filter", %{"status" => status}, socket) do
-    opts = if status == "all", do: [limit: 100], else: [limit: 100, status: status]
-    entries = Joy.MessageLog.list_recent(socket.assigns.channel.id, opts)
+    entries = load_entries(socket.assigns.channel.id, status, socket.assigns.search_type, socket.assigns.search_patient)
     {:noreply,
      socket
      |> assign(:filter_status, status)
+     |> stream(:entries, entries, reset: true)}
+  end
+
+  def handle_event("search", %{"type" => type, "patient" => patient}, socket) do
+    entries = load_entries(socket.assigns.channel.id, socket.assigns.filter_status, type, patient)
+    {:noreply,
+     socket
+     |> assign(:search_type, type)
+     |> assign(:search_patient, patient)
      |> stream(:entries, entries, reset: true)}
   end
 
@@ -67,23 +85,63 @@ defmodule JoyWeb.MessageLog.IndexLive do
     end
   end
 
+  def handle_event("retry_all_failed", _, socket) do
+    if Joy.ChannelManager.channel_running?(socket.assigns.channel.id) do
+      {:ok, count} = Joy.MessageLog.retry_all_failed(socket.assigns.channel.id)
+      entries = load_entries(socket.assigns.channel.id, socket.assigns.filter_status,
+                             socket.assigns.search_type, socket.assigns.search_patient)
+      {:noreply,
+       socket
+       |> put_flash(:info, "Requeued #{count} message(s)")
+       |> assign(:failed_count, count_failed(socket.assigns.channel.id))
+       |> stream(:entries, entries, reset: true)}
+    else
+      {:noreply, put_flash(socket, :error, "Channel is not running")}
+    end
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} page_title={@page_title} current_scope={@current_scope}>
     <div class="space-y-4">
-      <div class="flex items-center justify-between">
+      <div class="flex items-center justify-between flex-wrap gap-2">
         <.link navigate={~p"/channels/#{@channel.id}"} class="btn btn-ghost btn-sm">
           <.icon name="hero-arrow-left" class="w-4 h-4" /> {@channel.name}
         </.link>
-        <div class="flex gap-1">
-          <button :for={s <- ["all", "pending", "processed", "failed", "retried"]}
-                  phx-click="filter" phx-value-status={s}
-                  class={"btn btn-sm #{if @filter_status == s, do: "btn-primary", else: "btn-ghost"}"}>
-            {String.capitalize(s)}
+        <div class="flex items-center gap-2 flex-wrap">
+          <button :if={@failed_count > 0}
+                  phx-click="retry_all_failed"
+                  data-confirm={"Retry all #{@failed_count} failed message(s)?"}
+                  class="btn btn-warning btn-sm">
+            <.icon name="hero-arrow-path" class="w-4 h-4" /> Retry All Failed ({@failed_count})
           </button>
+          <div class="flex gap-1">
+            <button :for={s <- ["all", "pending", "processed", "failed", "retried"]}
+                    phx-click="filter" phx-value-status={s}
+                    class={"btn btn-sm #{if @filter_status == s, do: "btn-primary", else: "btn-ghost"}"}>
+              {String.capitalize(s)}
+            </button>
+          </div>
         </div>
       </div>
+
+      <%!-- Search bar --%>
+      <form phx-submit="search" class="flex gap-2 flex-wrap">
+        <input type="text" name="type" value={@search_type}
+               placeholder="Message type (e.g. ADT^A01)"
+               class="input input-bordered input-sm flex-1 min-w-32 font-mono" />
+        <input type="text" name="patient" value={@search_patient}
+               placeholder="Patient ID"
+               class="input input-bordered input-sm flex-1 min-w-32 font-mono" />
+        <button type="submit" class="btn btn-ghost btn-sm">
+          <.icon name="hero-magnifying-glass" class="w-4 h-4" /> Search
+        </button>
+        <button :if={@search_type != "" or @search_patient != ""}
+                type="button"
+                phx-click="search" phx-value-type="" phx-value-patient=""
+                class="btn btn-ghost btn-sm text-base-content/50">Clear</button>
+      </form>
 
       <div class={"flex gap-4 #{if @selected_entry, do: "items-start", else: ""}"}>
         <%!-- Message table --%>
@@ -96,6 +154,7 @@ defmodule JoyWeb.MessageLog.IndexLive do
                   <th>Control ID</th>
                   <th>Status</th>
                   <th>Type</th>
+                  <th>Patient ID</th>
                   <th>Preview</th>
                 </tr>
               </thead>
@@ -110,7 +169,8 @@ defmodule JoyWeb.MessageLog.IndexLive do
                   </td>
                   <td class="font-mono text-xs">{entry.message_control_id || "—"}</td>
                   <td><span class={"badge badge-xs #{status_class(entry.status)}"}>{entry.status}</span></td>
-                  <td class="text-xs font-mono">{extract_type(entry.raw_hl7)}</td>
+                  <td class="text-xs font-mono">{entry.message_type || extract_type(entry.raw_hl7)}</td>
+                  <td class="text-xs font-mono">{entry.patient_id || "—"}</td>
                   <td class="text-xs text-base-content/60 max-w-xs truncate font-mono">
                     {String.slice(entry.raw_hl7 || "", 0, 60)}
                   </td>
@@ -138,6 +198,14 @@ defmodule JoyWeb.MessageLog.IndexLive do
               <div class="flex justify-between">
                 <span class="text-base-content/50">Control ID</span>
                 <span class="font-mono">{@selected_entry.message_control_id || "—"}</span>
+              </div>
+              <div :if={@selected_entry.message_type} class="flex justify-between">
+                <span class="text-base-content/50">Type</span>
+                <span class="font-mono">{@selected_entry.message_type}</span>
+              </div>
+              <div :if={@selected_entry.patient_id} class="flex justify-between">
+                <span class="text-base-content/50">Patient ID</span>
+                <span class="font-mono">{@selected_entry.patient_id}</span>
               </div>
               <div class="flex justify-between">
                 <span class="text-base-content/50">Received</span>
@@ -178,6 +246,25 @@ defmodule JoyWeb.MessageLog.IndexLive do
     </div>
     </Layouts.app>
     """
+  end
+
+  defp load_entries(channel_id, status, message_type, patient_id) do
+    opts =
+      [limit: 100]
+      |> then(fn o -> if status != "all", do: [{:status, status} | o], else: o end)
+      |> then(fn o -> if message_type != "", do: [{:message_type, message_type} | o], else: o end)
+      |> then(fn o -> if patient_id != "", do: [{:patient_id, patient_id} | o], else: o end)
+
+    Joy.MessageLog.list_recent(channel_id, opts)
+  end
+
+  defp count_failed(channel_id) do
+    import Ecto.Query
+    Joy.Repo.one(
+      from e in Joy.MessageLog.Entry,
+      where: e.channel_id == ^channel_id and e.status == "failed",
+      select: count(e.id)
+    ) || 0
   end
 
   defp format_dt(nil), do: "—"

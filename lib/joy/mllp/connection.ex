@@ -1,14 +1,19 @@
 defmodule Joy.MLLP.Connection do
   @moduledoc """
-  Handles a single MLLP TCP client connection.
+  Handles a single MLLP TCP (or TLS) client connection.
 
   Message flow (guaranteeing at-least-once delivery):
-    1. Receive TCP data, buffer partial frames
+    1. Receive TCP/SSL data, buffer partial frames
     2. Extract complete MLLP frames via Joy.MLLP.Framer.unwrap/1
     3. Parse HL7 with Joy.HL7.Parser
     4. Persist to message_log as :pending BEFORE ACKing
     5. Send ACK (AA on success, AE on error)
     6. Dispatch to Joy.Channel.Pipeline async
+
+  Transport abstraction:
+    - gen_tcp: messages arrive as {:tcp, socket, data}, {:tcp_closed, _}, {:tcp_error, _, _}
+    - ssl: messages arrive as {:ssl, socket, data}, {:ssl_closed, _}, {:ssl_error, _, _}
+    - active mode is set via :inet.setopts (gen_tcp) or :ssl.setopts (ssl)
 
   Why persist before ACKing: if we crash after persisting but before processing,
   the pipeline requeues on restart. If we crash before persisting, the sender
@@ -26,37 +31,39 @@ defmodule Joy.MLLP.Connection do
   import Bitwise
   require Logger
 
-  def start_link({channel_id, socket}) do
-    GenServer.start_link(__MODULE__, {channel_id, socket})
+  def start_link({channel_id, socket, transport}) do
+    GenServer.start_link(__MODULE__, {channel_id, socket, transport})
   end
 
-  def child_spec({channel_id, socket}) do
+  def child_spec({channel_id, socket, transport}) do
     %{
       id: {__MODULE__, :erlang.unique_integer()},
-      start: {__MODULE__, :start_link, [{channel_id, socket}]},
+      start: {__MODULE__, :start_link, [{channel_id, socket, transport}]},
       restart: :temporary,
       type: :worker
     }
   end
 
   @impl true
-  def init({channel_id, socket}) do
+  def init({channel_id, socket, transport}) do
     channel = Joy.Repo.get!(Joy.Channels.Channel, channel_id)
 
-    case check_peer_ip(socket, channel.allowed_ips) do
+    case check_peer_ip(socket, channel.allowed_ips, transport) do
       :ok ->
-        :inet.setopts(socket, active: true)
-        {:ok, %{channel_id: channel_id, socket: socket, buffer: ""}}
+        set_active(socket, transport)
+        {:ok, %{channel_id: channel_id, socket: socket, buffer: "", transport: transport}}
 
       {:rejected, peer_ip} ->
         Logger.warning("[MLLP.Connection] Rejected connection from #{peer_ip} — not in allowlist for channel #{channel_id}")
-        :gen_tcp.close(socket)
+        close(socket, transport)
         {:stop, :normal}
     end
   end
 
   @impl true
+  # gen_tcp active mode messages
   def handle_info({:tcp, _socket, data}, state) do
+    Joy.ChannelStats.incr_received(state.channel_id)
     new_state = process_buffer(%{state | buffer: state.buffer <> data})
     {:noreply, new_state}
   end
@@ -68,6 +75,23 @@ defmodule Joy.MLLP.Connection do
 
   def handle_info({:tcp_error, _socket, reason}, state) do
     Logger.warning("[MLLP.Connection] TCP error on channel #{state.channel_id}: #{inspect(reason)}")
+    {:stop, reason, state}
+  end
+
+  # ssl active mode messages
+  def handle_info({:ssl, _socket, data}, state) do
+    Joy.ChannelStats.incr_received(state.channel_id)
+    new_state = process_buffer(%{state | buffer: state.buffer <> data})
+    {:noreply, new_state}
+  end
+
+  def handle_info({:ssl_closed, _socket}, state) do
+    Logger.debug("[MLLP.Connection] TLS client disconnected (channel #{state.channel_id})")
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:ssl_error, _socket, reason}, state) do
+    Logger.warning("[MLLP.Connection] TLS error on channel #{state.channel_id}: #{inspect(reason)}")
     {:stop, reason, state}
   end
 
@@ -96,28 +120,30 @@ defmodule Joy.MLLP.Connection do
         case Joy.MessageLog.persist_pending(state.channel_id, message_control_id, raw_hl7) do
           {:ok, %{id: nil}} ->
             # Duplicate — already persisted (same message_control_id). Just ACK.
-            send_ack(state.socket, msg, :aa)
+            send_ack(state.socket, state.transport, msg, :aa)
 
           {:ok, entry} ->
-            send_ack(state.socket, msg, :aa)
+            send_ack(state.socket, state.transport, msg, :aa)
             dispatch_to_pipeline(state.channel_id, entry.id)
 
           {:error, reason} ->
             Logger.error("[MLLP.Connection] Failed to persist message: #{inspect(reason)}")
-            send_ack(state.socket, msg, :ae)
+            send_ack(state.socket, state.transport, msg, :ae)
         end
 
       {:error, reason} ->
         Logger.error("[MLLP.Connection] Failed to parse HL7: #{inspect(reason)}")
-        # Build a minimal ACK from raw data
-        :gen_tcp.send(state.socket, minimal_ae_ack())
+        send_raw(state.socket, state.transport, minimal_ae_ack())
     end
   end
 
-  defp send_ack(socket, msg, code) do
+  defp send_ack(socket, transport, msg, code) do
     ack = Joy.MLLP.Framer.build_ack(msg, code)
-    :gen_tcp.send(socket, ack)
+    send_raw(socket, transport, ack)
   end
+
+  defp send_raw(socket, :gen_tcp, data), do: :gen_tcp.send(socket, data)
+  defp send_raw(socket, :ssl, data), do: :ssl.send(socket, data)
 
   defp dispatch_to_pipeline(channel_id, entry_id) do
     case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do
@@ -132,10 +158,15 @@ defmodule Joy.MLLP.Connection do
 
   # Returns :ok if the peer IP is permitted, {:rejected, ip_string} otherwise.
   # An empty allowlist means accept from any IP.
-  defp check_peer_ip(_socket, []), do: :ok
+  defp check_peer_ip(_socket, [], _transport), do: :ok
 
-  defp check_peer_ip(socket, allowed_ips) do
-    case :inet.peername(socket) do
+  defp check_peer_ip(socket, allowed_ips, transport) do
+    peername_fn = case transport do
+      :ssl -> &:ssl.peername/1
+      :gen_tcp -> &:inet.peername/1
+    end
+
+    case peername_fn.(socket) do
       {:ok, {ip_tuple, _port}} ->
         peer_str = ip_tuple |> :inet.ntoa() |> to_string()
         if Enum.any?(allowed_ips, &ip_matches?(peer_str, ip_tuple, &1)),
@@ -147,6 +178,12 @@ defmodule Joy.MLLP.Connection do
         :ok
     end
   end
+
+  defp set_active(socket, :gen_tcp), do: :inet.setopts(socket, active: true)
+  defp set_active(socket, :ssl), do: :ssl.setopts(socket, active: true)
+
+  defp close(socket, :gen_tcp), do: :gen_tcp.close(socket)
+  defp close(socket, :ssl), do: :ssl.close(socket)
 
   defp ip_matches?(peer_str, peer_tuple, entry) do
     case String.split(entry, "/", parts: 2) do
