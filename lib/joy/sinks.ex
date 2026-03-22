@@ -56,7 +56,10 @@ defmodule Joy.Sinks do
   # --- GenServer callbacks ---
 
   @impl true
-  def init(state), do: {:ok, state}
+  def init(state) do
+    Phoenix.PubSub.subscribe(Joy.PubSub, "sinks")
+    {:ok, state}
+  end
 
   @impl true
   def handle_cast({:push, name, msg}, state) do
@@ -74,14 +77,14 @@ defmodule Joy.Sinks do
     updated = Enum.take([entry | existing], @max_messages)
     new_state = Map.put(state, name, updated)
 
-    Phoenix.PubSub.broadcast(Joy.PubSub, "sinks", {:sink_message, name, entry})
+    Phoenix.PubSub.broadcast_from(Joy.PubSub, self(), "sinks", {:sink_message, name, entry})
     {:noreply, new_state}
   end
 
   @impl true
   def handle_cast({:clear, name}, state) do
     new_state = Map.put(state, name, [])
-    Phoenix.PubSub.broadcast(Joy.PubSub, "sinks", {:sink_cleared, name})
+    Phoenix.PubSub.broadcast_from(Joy.PubSub, self(), "sinks", {:sink_cleared, name})
     {:noreply, new_state}
   end
 
@@ -98,5 +101,17 @@ defmodule Joy.Sinks do
   @impl true
   def handle_call(:all, _from, state) do
     {:reply, state, state}
+  end
+
+  @impl true
+  def handle_info({:sink_message, name, entry}, state) do
+    existing = Map.get(state, name, [])
+    updated = Enum.take([entry | existing], @max_messages)
+    {:noreply, Map.put(state, name, updated)}
+  end
+
+  @impl true
+  def handle_info({:sink_cleared, name}, state) do
+    {:noreply, Map.put(state, name, [])}
   end
 end
