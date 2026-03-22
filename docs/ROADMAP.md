@@ -1,6 +1,6 @@
 # Joy Roadmap
 
-All planned features have been implemented. This document records what was built and why.
+Items 1–8 are complete. Items 9–15 are the next wave, in rough priority order.
 
 ---
 
@@ -105,3 +105,75 @@ All planned features have been implemented. This document records what was built
 - Alert delivery: email via `Joy.Mailer` / Swoosh when `alert_email` is configured; HTTP webhook POST (JSON payload) via `Req` when `alert_webhook_url` is configured
 - Per-channel config on the `channels` table: `alert_enabled`, `alert_threshold` (default 5), `alert_email`, `alert_webhook_url`, `alert_cooldown_minutes` (default 60)
 - Channel show page: alert configuration form
+
+---
+
+## 9. Organizations (Channel Grouping) ✅ Implemented
+
+**Why:** As channel counts grow, operators need to group them by health system for navigation, shared config, and aggregate visibility.
+
+**What was built:**
+- `organizations` table with name, slug (auto-generated, unique), description, shared `allowed_ips`, `alert_email`, `alert_webhook_url`, `tls_ca_cert_pem`
+- Nullable `organization_id` FK on `channels` (nilify_all) and `users` (foundation for future scoped auth)
+- `Joy.Organizations` context with full CRUD and PubSub on `"organizations"` topic
+- `Joy.IPValidator` extracted from `Channel` and shared with `Organization` changeset
+- `Joy.Channels.effective_allowed_ips/1` unions channel + org IP allowlists; used by `MLLP.Connection`
+- `Joy.Alerting` falls back to org-level `alert_email`/`alert_webhook_url` when channel has none
+- Dashboard: channels grouped by org with aggregate recv/proc/fail stats per group
+- Channels index: Org column + org dropdown in create/edit modal
+- `/organizations` and `/organizations/:id` LiveViews (list, create, show with IP/alert/TLS sections)
+
+---
+
+## 10. Message Log Retention ✅ Implemented
+
+**Why:** The `message_log_entries` table grows without bound. PHI retention policies (HIPAA, state law) require data to be purged after a defined window. Long-running tables also degrade query performance.
+
+**What was built:**
+- `retention_settings` table (single-row config): retention window, schedule toggle, archive destination + credentials
+- Three archive backends behind a common `Joy.Retention.Archive` behaviour: `LocalFS`, `S3`, `Glacier` (S3 GLACIER storage class)
+- `ex_aws_s3` added for S3/Glacier uploads; credentials stored encrypted at rest via `Joy.Encrypted.StringType`
+- `Joy.Retention.run_purge/1` archives then deletes entries older than the retention window (excluding `:pending`); `all: true` option purges everything non-pending
+- Archives written as gzip-compressed NDJSON in 50k-entry chunks; safe to re-run (archive before delete, abort on archive failure)
+- `Joy.Retention.Scheduler` GenServer runs a daily purge at the configured UTC hour; duplicate-run protection via `last_purge_at` timestamp
+- `/tools/retention` LiveView: entry counts + oldest entry, settings form with conditional AWS/path fields, one-click purge with async progress, purge-all confirm modal, last-run summary
+
+---
+
+## 11. Pipeline Non-blocking Dispatch ⏳ Planned
+
+**Why:** The Pipeline GenServer currently processes one message at a time and blocks on slow/retrying destinations. A channel with a high-latency HTTP destination will see its throughput drop to that destination's RTT. This is a throughput bottleneck for busy channels.
+
+**Plan:** Introduce a bounded worker pool per channel (e.g. via `Task.Supervisor` or `poolboy`). The Pipeline queues dispatch tasks up to a configurable concurrency limit, so slow destinations no longer block the receive path.
+
+---
+
+## 12. Transform Segment Ordering ⏳ Planned
+
+**Why:** The `set` DSL function appends new segments to the end of the message, regardless of the canonical HL7 segment order. Most downstream systems are lenient, but strict validators (e.g. HL7 FHIR converters, some EHR interfaces) reject messages with segments out of order.
+
+**Plan:** Maintain a known-order map for standard HL7 v2 segment types (MSH, EVN, PID, PV1, OBR, OBX, …). After a transform runs, sort the segment list against this map, preserving relative order for unknown/repeated segments.
+
+---
+
+## 13. Sinks Cluster Distribution ⏳ Planned
+
+**Why:** `Joy.Sinks` is a node-local ETS-backed GenServer. In a multi-node cluster, the UI on node A shows an empty sink if the channel is running on node B. This makes the Sinks tool unreliable in production deployments.
+
+**Plan:** Replace node-local ETS with a Horde-registered global sink store, or use Phoenix PubSub to replicate push events to all nodes so every node's UI reflects the full picture.
+
+---
+
+## 14. ENCRYPTION_KEY Rotation ⏳ Planned
+
+**Why:** Rotating the AES-256-GCM key currently requires a custom migration script to re-encrypt all `destination_configs.config` values and any other encrypted fields. There is no tooling for this, making rotation operationally risky.
+
+**Plan:** Add a `mix joy.rotate_key --old-key OLD --new-key NEW` task that iterates all encrypted fields, decrypts with the old key, re-encrypts with the new key, and writes back in a single transaction. Add a dual-read fallback period so a rolling deploy does not break in-flight requests.
+
+---
+
+## 15. Channel Pinning ⏳ Planned
+
+**Why:** Horde distributes channel supervisor trees across nodes using a consistent hash ring. There is no way to pin a channel to a specific node — useful for network proximity (e.g. a channel serving a device on a specific subnet), or for controlled rolling upgrades where you want to drain one node before taking it down.
+
+**Plan:** Add an optional `pinned_node` field to channels. `Joy.ChannelManager` passes a `:distribution` option to Horde that restricts placement to the named node. The channel show page exposes a node picker dropdown populated from `Node.list/0`.

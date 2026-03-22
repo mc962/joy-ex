@@ -41,6 +41,7 @@ defmodule JoyWeb.Router do
       live "/users", Users.IndexLive, :index
       live "/tools/mllp-client", Tools.MllpClientLive, :index
       live "/tools/sinks", Tools.SinksLive, :index
+      live "/tools/retention", RetentionLive, :index
     end
   end
 

@@ -51,6 +51,7 @@ defmodule JoyWeb.Layouts do
           </p>
           <.nav_link icon="hero-paper-airplane" label="MLLP Client" href={~p"/tools/mllp-client"} />
           <.nav_link icon="hero-inbox" label="Message Sinks" href={~p"/tools/sinks"} />
+          <.nav_link icon="hero-archive-box-arrow-down" label="Log Retention" href={~p"/tools/retention"} />
         </div>
 
         <%!-- Footer --%>

@@ -60,6 +60,9 @@ defmodule Joy.Application do
       # Checks TLS certificate expiry daily; fires alerts for certs expiring within 30 days.
       Joy.CertMonitor,
 
+      # Runs the scheduled message log purge at the configured UTC hour.
+      Joy.Retention.Scheduler,
+
       # In-memory message sink for testing destinations. Capped ring buffer per
       # named sink; messages are inspectable via the Sinks UI at /tools/sinks.
       Joy.Sinks,

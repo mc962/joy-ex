@@ -68,10 +68,11 @@ defmodule Joy.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:ecto_psql_extras, "~> 0.6"},
-      # AWS destination adapters
+      # AWS destination adapters + log archival
       {:ex_aws, "~> 2.5"},
       {:ex_aws_sns, "~> 2.3"},
       {:ex_aws_sqs, "~> 3.4"},
+      {:ex_aws_s3, "~> 2.5"},
       # ex_aws requires an HTTP client; hackney is the default
       {:hackney, "~> 1.18"},
       # Redis destination adapter

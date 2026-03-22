@@ -25,6 +25,8 @@ This document covers specific implementation decisions in Joy: why something was
 - [Alerting: Consecutive Failure Detection](#alerting-consecutive-failure-detection)
 - [Message Search: Extract at Persist Time](#message-search-extract-at-persist-time)
 - [Sinks: Design as a Test Tool](#sinks-design-as-a-test-tool)
+- [Organizations: Channel Grouping](#organizations-channel-grouping)
+- [Message Log Retention](#message-log-retention)
 - [Known Gaps](#known-gaps)
 
 ---
@@ -554,18 +556,136 @@ The Sink adapter (`Joy.Destinations.Adapters.Sink`) calls `Joy.Sinks.push/2` syn
 
 ---
 
+## Organizations: Channel Grouping
+
+### Why slugs
+
+Organizations have both a human-readable `name` and a URL-safe `slug`. The slug is auto-generated from the name (lowercase, non-alphanumeric runs replaced with `-`) but is stored as a separate field so it can be customized after creation without changing the display name. This matters for organizations with names containing legal abbreviations or ampersands that would produce awkward slugs.
+
+The slug is validated against `~r/^[a-z0-9-]+$/` and must be unique across all organizations. Uniqueness is enforced at the database level with a unique index, not just in the changeset.
+
+### Why `nilify_all` instead of `cascade`
+
+Deleting an organization must not delete its channels. Channels are operational infrastructure — taking down an ADT feed because someone deleted its org grouping would be a serious incident. `on_delete: :nilify_all` sets `organization_id` to `nil` on affected channels and users, orphaning them back to an ungrouped state. The data and runtime behavior are fully preserved; only the grouping metadata is lost.
+
+### Effective IP allowlist union
+
+`Joy.Channels.effective_allowed_ips/1` merges channel and org IP lists:
+
+```elixir
+def effective_allowed_ips(%Channel{allowed_ips: ch, organization: %{allowed_ips: org}}),
+  do: Enum.uniq(ch ++ org)
+def effective_allowed_ips(%Channel{allowed_ips: ch}), do: ch
+```
+
+The second clause handles both the case where `organization_id` is `nil` (no org) and the case where the org association was not preloaded. `MLLP.Connection.init/1` preloads `:organization` narrowly (no transform steps or destination configs) and passes the result to this function. An empty final list still means "accept from anywhere" — this is unchanged from the pre-org behavior.
+
+### Alerting fallback chain
+
+`Joy.Alerting.effective_field/2` tries the channel first, then the org:
+
+```elixir
+defp effective_field(channel, field) do
+  val = Map.get(channel, field)
+  if is_binary(val) and val != "" do
+    val
+  else
+    get_in(channel, [Access.key(:organization), Access.key(field)])
+  end
+end
+```
+
+`Access.key/1` returns `nil` when the key is missing or the struct is `nil`, so this is safe whether or not the channel has an org. The org is already preloaded on every channel struct via `@preload_query` in `Joy.Channels`, so no extra query is needed at alert delivery time.
+
+### Shared IP validator extraction
+
+Before organizations, `valid_ip_or_cidr?/1` was a private function in `Joy.Channels.Channel`. Adding the same validation to `Organization.changeset` without extraction would have duplicated the logic. `Joy.IPValidator` is a small public module (one function + one changeset helper) that both schemas delegate to. It has no state and no dependencies beyond `:inet` from OTP.
+
+### Dashboard grouping
+
+The dashboard computes groups in `group_channels/1`:
+
+```elixir
+defp group_channels(channels) do
+  grouped = Enum.group_by(channels, & &1.organization)
+  {nil_channels, org_groups} = Map.pop(grouped, nil, [])
+  sorted_orgs = Enum.sort_by(org_groups, fn {org, _} -> org.name end)
+  sorted_orgs ++ (if nil_channels == [], do: [], else: [{nil, nil_channels}])
+end
+```
+
+`Enum.group_by` on the preloaded `organization` struct produces a map keyed by the org struct itself (or `nil`). Elixir map equality on structs is by value, so all channels sharing the same org struct instance get grouped correctly. The dashboard renders one `<tbody>` per group — this is valid HTML5 (multiple `<tbody>` elements in a single `<table>`) and allows each org to get a header row without breaking the table layout. When no orgs exist, the result is `[{nil, all_channels}]` and the "Ungrouped" header is suppressed, producing the same flat-list appearance as before organizations were added.
+
+---
+
+## Message Log Retention
+
+### Archive-before-delete invariant
+
+`run_purge/1` will not delete a single row unless all archive chunks have been uploaded successfully. The implementation uses `Enum.reduce_while` over the chunk list, halting and returning `{:error, reason}` on the first failed upload. Only after the reduce completes with `:ok` does the function proceed to deletion. This means partial failures leave data in the database (safe) rather than deleting rows that were not archived (data loss).
+
+The consequence of this design is that a misconfigured or unavailable archive backend causes the scheduled purge to skip silently (logged at `error`). Operators should verify archive connectivity before enabling the schedule.
+
+### Single-row settings table
+
+`retention_settings` always has exactly one row. `Joy.Retention.get_settings/0` uses `Repo.one/1` and, if the result is `nil`, inserts a default row:
+
+```elixir
+def get_settings do
+  Repo.one(Settings) || create_default_settings()
+end
+```
+
+The alternative — using application config (`config :joy, retention: [...]`) — would make the settings non-editable from the web UI without a restart. The single-row table pattern gives operators a live-editable config with a simple Ecto changeset without needing a generic key-value store.
+
+### Archive format: gzip NDJSON
+
+NDJSON (newline-delimited JSON) is chosen over CSV or binary formats because:
+- It is self-describing: each line is a complete JSON object with field names.
+- It is streamable: lines can be processed one at a time without reading the whole file.
+- It survives partial writes: a truncated file still yields all complete lines before the truncation point.
+- Standard tools (`jq`, `grep`, `wc -l`) can process it without a schema.
+
+Archives are gzip-compressed to reduce storage cost. HL7 messages are highly repetitive text and compress well — typical compression ratios are 8:1 to 15:1.
+
+### S3 vs Glacier: storage class approach
+
+The Glacier backend uses `x-amz-storage-class: GLACIER` on a standard S3 `PutObject` call rather than the legacy Glacier Vault API (`glacierservice.amazonaws.com`). This is the AWS-recommended approach for new applications. Reasons:
+- Objects are managed with normal S3 tooling (console, CLI, lifecycle policies).
+- The same bucket, prefix, and credentials work for both backends — operators can start with S3 and switch to Glacier (or vice versa) by changing the destination setting without reconfiguring credentials.
+- The legacy Vault API requires computing a tree-hash (SHA-256 of 1 MB chunks, then recursively hashing pairs) which adds ~60 lines of non-trivial code. The S3 API has no such requirement.
+
+The trade-off: objects in the `GLACIER` storage class require a restore request (3–5 hours for standard, 1–5 minutes for expedited at extra cost) before they can be read. This is acceptable for compliance archives that are rarely if ever accessed.
+
+### Memory usage and the 50k chunk limit
+
+The current implementation fetches all eligible entry IDs into a list, then processes chunks:
+
+```elixir
+ids = base_query |> select([e], e.id) |> Repo.all()
+ids |> Enum.chunk_every(50_000) |> Enum.with_index(1) |> Enum.reduce_while(...)
+```
+
+Within each chunk, all entries are loaded into memory to serialize them. For 50,000 entries at ~3 KB average (HL7 messages vary widely), this is ~150 MB per chunk. Operators with very large messages or very high message volumes should consider setting the retention window tightly to keep eligible-entry counts manageable, or archiving more frequently. A future improvement would use `Repo.stream` with S3 multipart uploads to process entries without holding the full chunk in memory.
+
+### Pending entries are unconditionally excluded
+
+The query always includes `e.status != 'pending'`, regardless of whether `all: true` was passed. This is an unconditional invariant, not a configurable option. Deleting pending entries would remove messages from the at-least-once delivery guarantee — the Pipeline would not find them on restart and they would be silently lost. There is no operational scenario where deleting pending entries is the right action; if a channel accumulates too many pending entries, the correct response is to investigate why they are not being processed.
+
+---
+
 ## Known Gaps
 
 These are documented limitations in the current design that are worth knowing about.
 
-**No key rotation for `ENCRYPTION_KEY`:** Rotating the key requires re-encrypting all `destination_configs.config` values. There is no tooling for this. A rotation would need to be done as a custom migration.
+**Pipeline blocks on slow destinations:** Retrying a slow destination blocks the Pipeline GenServer for the duration. High-latency destinations reduce channel throughput. Mitigations: use asynchronous destinations (SQS, SNS, Redis), keep `retry_attempts` low, or move to a pool-based pipeline model (see Roadmap item 11).
 
-**No message log retention:** The `message_log_entries` table grows without bound. Retention policy enforcement requires an external cron job or scheduled database task.
+**No channel pinning:** Horde distributes channels across nodes using a consistent hash ring. There is no mechanism to pin a channel to a specific node. This matters if you want to colocate specific channels for network proximity reasons, or if you want to control which node runs a channel during a rolling upgrade (see Roadmap item 15).
 
-**Pipeline blocks on slow destinations:** Retrying a slow destination blocks the Pipeline GenServer for the duration. High-latency destinations reduce channel throughput. Mitigations: use asynchronous destinations (SQS, SNS, Redis), keep `retry_attempts` low, or move to a pool-based pipeline model (future work).
+**Transform `set` does not enforce segment ordering:** Writing to a nonexistent segment appends it to the end of the segment list regardless of HL7 segment ordering rules. Most downstream systems are lenient about this, but strict validators may reject messages with segments in unexpected positions (see Roadmap item 12).
 
-**No channel pinning:** Horde distributes channels across nodes using a consistent hash ring. There is no mechanism to pin a channel to a specific node. This matters if you want to colocate specific channels for network proximity reasons, or if you want to control which node runs a channel during a rolling upgrade.
+**`Joy.Sinks` is node-local:** Messages arrive at the sink on whichever node is running the channel. The Sinks UI shows the local node's sink state only. In a cluster, this means the UI may show empty sinks even when messages are flowing on another node (see Roadmap item 13).
 
-**Transform `set` does not enforce segment ordering:** Writing to a nonexistent segment appends it to the end of the segment list regardless of HL7 segment ordering rules. Most downstream systems are lenient about this, but strict validators may reject messages with segments in unexpected positions.
+**No key rotation for `ENCRYPTION_KEY`:** Rotating the key requires re-encrypting all `destination_configs.config` values, `channels.tls_key_pem`, and `retention_settings` AWS credentials. There is no tooling for this. A rotation would need to be done as a custom migration script (see Roadmap item 14).
 
-**`Joy.Sinks` is node-local:** Messages arrive at the sink on whichever node is running the channel. The Sinks UI shows the local node's sink state only. In a cluster, this means the UI may show empty sinks even when messages are flowing on another node.
+**Retention scheduler is not a distributed singleton:** `Joy.Retention.Scheduler` runs on every node. The `last_purge_at` guard prevents most duplicate runs, but there is a small race window where two nodes both check within the same minute and both trigger a purge. The result is two archive files for the same set of entries followed by one delete pass — safe, but wasteful. A future improvement would use a distributed lock or elect a single scheduler node.

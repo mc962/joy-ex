@@ -13,6 +13,8 @@ Joy is an HL7 v2.x integration engine: it receives HL7 messages over MLLP (TCP),
 - [HL7 Representation](#hl7-representation)
 - [Clustering](#clustering)
 - [Web Interface](#web-interface)
+- [Organizations](#organizations)
+- [Message Log Retention](#message-log-retention)
 - [Data Model](#data-model)
 
 ---
@@ -100,6 +102,7 @@ Joy.Supervisor  (:one_for_one)
 ├── Joy.ChannelStats           GenServer — ETS-backed per-channel throughput counters (node-local)
 ├── Joy.Alerting               GenServer — ETS-backed consecutive failure tracking + alert delivery (node-local)
 ├── Joy.CertMonitor            GenServer — daily TLS cert expiry check; fires alerts via Joy.Alerting (node-local)
+├── Joy.Retention.Scheduler    GenServer — hourly tick; fires daily message log purge at configured UTC hour (node-local)
 ├── Joy.Sinks                  GenServer — in-memory test sink (node-local)
 │
 ├── Joy.MLLP.ConnectionSupervisor   DynamicSupervisor (:one_for_one, node-local)
@@ -133,6 +136,8 @@ Joy.Supervisor  (:one_for_one)
 **`ChannelStats` and `Alerting`** are node-local GenServers backed by ETS. `ChannelStats` tracks received/processed/failed counts per channel per day; `Alerting` tracks consecutive failures and fires email/webhook alerts when a per-channel threshold is exceeded. Both are intentionally node-local: they track ephemeral runtime state that resets on restart, not durable data.
 
 **`CertMonitor`** is a node-local GenServer that runs a TLS certificate expiry check on startup and every 24 hours. It queries channels whose `tls_cert_expires_at` is within 30 days and calls `Joy.Alerting.send_direct/3` to fire an email/webhook alert. Because it reads from the database, it works correctly regardless of which node is running each channel.
+
+**`Retention.Scheduler`** is a node-local GenServer that wakes once per hour and, if the schedule is enabled and the current UTC hour matches `retention_settings.schedule_hour`, triggers `Joy.Retention.run_purge/0` in a background Task. A `last_purge_at` timestamp on the settings row provides coarse duplicate-run protection in multi-node deployments — if two nodes check at the same time and both see the hour match, the second to update `last_purge_at` will find it already set to today on the next check.
 
 ---
 
@@ -309,15 +314,18 @@ Authentication uses `phx.gen.auth` (email + password + magic link via email toke
 
 | Path | Purpose |
 |---|---|
-| `/` | Dashboard — channel status, throughput stats, cert expiry warnings |
-| `/channels` | Channel list; create new channels |
+| `/` | Dashboard — channels grouped by org, throughput stats, cert expiry warnings |
+| `/channels` | Channel list; create/edit channels (includes org assignment) |
 | `/channels/:id` | Channel detail — transforms, destinations, TLS config, alerting, pause/resume |
 | `/channels/:id/transforms/:id/editor` | Full-screen transform script editor with live preview |
 | `/channels/:id/messages` | Message log — search by message type / patient ID, retry failed |
 | `/messages/failed` | Global dead letter queue — all failed messages across all channels |
+| `/organizations` | Organization list; create new organizations |
+| `/organizations/:id` | Organization detail — member channels, IP allowlist, alert config, TLS CA cert |
 | `/users` | User list — admin management |
 | `/tools/mllp-client` | Interactive MLLP client (plain TCP and TLS) for testing channels |
 | `/tools/sinks` | View in-memory sink contents for testing destinations |
+| `/tools/retention` | Message log retention settings and manual purge controls |
 
 ### Real-time updates
 
@@ -325,14 +333,60 @@ The dashboard and channel pages use Phoenix LiveView. Pipeline stats (processed 
 
 ---
 
+## Organizations
+
+An **organization** groups a set of channels under a shared name — typically a health system or facility. Organizations are a UI and config grouping only; they do not affect message routing or processing.
+
+**Shared config fallbacks:** An organization can carry an `allowed_ips` list, `alert_email`, `alert_webhook_url`, and `tls_ca_cert_pem`. These act as fallbacks:
+
+- `Joy.Channels.effective_allowed_ips/1` returns the union of the channel's own `allowed_ips` and the organization's `allowed_ips`. `MLLP.Connection` uses this union for connection filtering.
+- `Joy.Alerting.deliver/3` uses the channel-level `alert_email`/`alert_webhook_url` if set; otherwise falls back to the org's. If neither is set, no alert is delivered.
+
+The `organization_id` FK on `channels` uses `on_delete: :nilify_all`. Deleting an organization orphans its channels back to ungrouped status — it does not delete channels. This is the correct behavior: organizations are metadata, not owners.
+
+The same FK exists on `users` (also `nilify_all`) as a forward-compatible foundation for future org-scoped authentication. It is not currently enforced in access control.
+
+**Dashboard grouping:** The dashboard uses `Enum.group_by(channels, & &1.organization)` to bucket channels by their preloaded org struct, then renders one `<tbody>` per org with an aggregate stat row. Channels with no org appear under an "Ungrouped" header. When all channels are ungrouped (no orgs exist), the table renders as a flat list identical to pre-org behavior.
+
+---
+
+## Message Log Retention
+
+The `message_log_entries` table contains raw HL7 (PHI) and grows without bound. Retention manages this in two steps: **archive** then **delete**. Archiving is optional but deletion is not: the point is to remove old rows from the database.
+
+**Archive backends:** Three backends implement `Joy.Retention.Archive`:
+
+- `LocalFS` — writes gzip-compressed NDJSON to a directory on the server filesystem.
+- `S3` — uploads to an S3 bucket with STANDARD storage class.
+- `Glacier` — uploads to the same S3 bucket but with `x-amz-storage-class: GLACIER`, placing objects in Glacier retrieval tier (3–5 hour restore time). Uses the same S3 API and credentials as the S3 backend; no legacy Glacier Vault API.
+
+All three receive the same gzip-compressed NDJSON payload. The archive format is one JSON object per line, one line per message log entry, including `raw_hl7`.
+
+**Purge safety invariant:** `run_purge/1` archives first. If archiving fails, the function returns `{:error, reason}` and does not delete. Entries are only deleted after all archive chunks have been uploaded successfully. This means a partial failure leaves data in the database (safe) rather than deleting unarchived entries (unsafe).
+
+**Chunking:** Entries are archived in chunks of 50,000 to bound memory usage. Each chunk becomes a separate timestamped file (`joy_archive_YYYYMMDD_HHMMSS_part1.ndjson.gz`, etc.). Deletion then proceeds in batches of 1,000 rows.
+
+**Pending entries are never deleted.** The query always includes `AND status != 'pending'`. Pending entries are in-flight; deleting them would break at-least-once delivery.
+
+**Scheduled purge:** `Joy.Retention.Scheduler` checks hourly whether to run. It fires if `schedule_enabled` is true, the current UTC hour matches `schedule_hour`, and `last_purge_at` is not already set to today. The `last_purge_at` guard provides coarse protection against duplicate runs in multi-node deployments — it is not a distributed lock, but the worst-case outcome (two nodes both archive the same entries on the same morning) is safe: entries are deleted once, and the archive gets two copies.
+
+---
+
 ## Data Model
 
-Five tables, all in the `joy` Postgres database:
+Seven tables, all in the `joy` Postgres database:
 
 ```
+organizations
+  id, name, slug (unique), description, inserted_at, updated_at
+  allowed_ips (string[])        — unioned with per-channel list by effective_allowed_ips/1
+  alert_email, alert_webhook_url — fallback for member channels with no individual alert config
+  tls_ca_cert_pem (text)        — fallback CA cert for member channels with mTLS but no individual cert
+
 channels
   id, name, description, mllp_port (unique), started, inserted_at, updated_at
-  allowed_ips (string[])           — source IP allowlist; empty = allow all
+  organization_id (FK → organizations, nilify_all)  — optional grouping; nil = ungrouped
+  allowed_ips (string[])           — source IP allowlist; empty = allow all; see effective_allowed_ips/1
   paused (bool)                    — pipeline holds pending messages; MLLP server keeps accepting
   tls_enabled (bool)
   tls_cert_pem (text)              — server certificate PEM (public)
@@ -355,20 +409,30 @@ destination_configs
 
 message_log_entries
   id, channel_id (FK), message_control_id, status (pending/processed/failed/retried),
-  raw_hl7, transformed_hl7, error, processed_at, inserted_at, updated_at
+  raw_hl7, transformed_hl7, error, processed_at, inserted_at
   message_type (varchar, indexed)  — MSH.9, extracted at persist time for search
   patient_id (varchar, indexed)    — PID.3, extracted at persist time for search
   UNIQUE INDEX (channel_id, message_control_id) WHERE message_control_id IS NOT NULL
 
 users  (phx.gen.auth standard)
   id, email, hashed_password, is_admin, confirmed_at, inserted_at, updated_at
+  organization_id (FK → organizations, nilify_all)  — foundation for future org-scoped auth; inert now
 
 user_tokens  (phx.gen.auth standard)
   id, user_id (FK), token, context, sent_to, inserted_at
+
+retention_settings  (single row — created on first access)
+  id, retention_days (default 90), schedule_enabled, schedule_hour (UTC, default 2)
+  archive_destination  — "none" | "local_fs" | "s3" | "glacier"
+  local_path           — for local_fs backend
+  aws_bucket, aws_prefix, aws_region
+  aws_access_key_id (encrypted), aws_secret_access_key (encrypted)
+  last_purge_at, last_purge_deleted, last_purge_archived
+  inserted_at, updated_at
 ```
 
 `destination_configs.config` is an encrypted binary (map serialized as JSON then AES-256-GCM encrypted). The Ecto type (`Joy.Encrypted.MapType`) transparently encrypts on insert and decrypts on load using the `ENCRYPTION_KEY`. Adapters see a plaintext map.
 
-`channels.tls_key_pem` uses the same encryption scheme via `Joy.Encrypted.StringType`, which encrypts/decrypts the raw PEM string rather than a JSON map. The server cert and CA cert are public data and stored as plain text.
+`channels.tls_key_pem` and `retention_settings.aws_access_key_id` / `aws_secret_access_key` use the same encryption scheme via `Joy.Encrypted.StringType`, which encrypts/decrypts a raw string rather than a JSON map. Public-facing cert material and non-secret fields are stored as plain text.
 
-`message_log_entries` is the only table that grows unboundedly. It contains raw HL7 (PHI). Plan a retention policy appropriate to your compliance requirements.
+`message_log_entries` contains raw HL7 (PHI) and grows over time. Configure a retention policy via `/tools/retention` appropriate to your compliance requirements (HIPAA minimum: 6 years for designated record sets; state law may differ).
