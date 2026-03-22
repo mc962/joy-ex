@@ -155,6 +155,9 @@ defmodule JoyWeb.Channels.ShowLive do
   def handle_event("delete_transform", %{"id" => id}, socket) do
     step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
     if step, do: Channels.delete_transform_step(step)
+    channel = Channels.get_channel!(socket.assigns.channel.id)
+    remaining_ids = Enum.map(channel.transform_steps, & &1.id)
+    if remaining_ids != [], do: Channels.reorder_transform_steps(socket.assigns.channel.id, remaining_ids)
     Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
     channel = Channels.get_channel!(socket.assigns.channel.id)
     {:noreply, assign(socket, :channel, channel)}
@@ -168,6 +171,36 @@ defmodule JoyWeb.Channels.ShowLive do
     Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
     channel = Channels.get_channel!(socket.assigns.channel.id)
     {:noreply, assign(socket, :channel, channel)}
+  end
+
+  def handle_event("move_transform", %{"id" => id, "value" => pos_str}, socket) do
+    steps = socket.assigns.channel.transform_steps
+    step = Enum.find(steps, &(to_string(&1.id) == id))
+
+    if step do
+      target =
+        pos_str
+        |> Integer.parse()
+        |> case do
+          {n, _} -> n - 1
+          :error -> step.position
+        end
+        |> max(0)
+        |> min(length(steps) - 1)
+
+      ordered_ids =
+        steps
+        |> Enum.reject(&(&1.id == step.id))
+        |> List.insert_at(target, step)
+        |> Enum.map(& &1.id)
+
+      Channels.reorder_transform_steps(socket.assigns.channel.id, ordered_ids)
+      Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+      channel = Channels.get_channel!(socket.assigns.channel.id)
+      {:noreply, assign(socket, :channel, channel)}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_event("save_destination", %{"destination_config" => params}, socket) do
@@ -375,7 +408,10 @@ defmodule JoyWeb.Channels.ShowLive do
           <div class="space-y-2">
             <div :for={step <- @channel.transform_steps}
                  class="flex items-center gap-3 p-3 rounded-lg border border-base-300 bg-base-200/50">
-              <span class="text-xs font-mono text-base-content/30 w-5 text-right">{step.position + 1}</span>
+              <input type="number" min="1" max={length(@channel.transform_steps)} value={step.position + 1}
+                     phx-keyup="move_transform" phx-key="Enter"
+                     phx-value-id={step.id}
+                     class="w-9 text-center text-xs font-mono text-base-content/40 bg-transparent border border-transparent rounded hover:border-base-300 focus:border-primary focus:outline-none focus:text-base-content px-0.5 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" />
               <div class="flex-1 min-w-0">
                 <p class="font-medium text-sm">{step.name}</p>
                 <p class="text-xs text-base-content/40 font-mono truncate">{String.slice(step.script, 0, 60)}...</p>

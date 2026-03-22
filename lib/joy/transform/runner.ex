@@ -58,7 +58,7 @@ defmodule Joy.Transform.Runner do
 
       case Task.yield(task, timeout_ms) || Task.shutdown(task) do
         {:ok, {:ok, transformed_msg}} ->
-          {:ok, transformed_msg}
+          {:ok, Joy.HL7.SegmentOrder.sort(transformed_msg)}
 
         {:ok, {:error, reason}} ->
           Logger.warning("[Transform.Runner] Script error",
