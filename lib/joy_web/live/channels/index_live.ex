@@ -1,7 +1,7 @@
 defmodule JoyWeb.Channels.IndexLive do
   @moduledoc "Channel list with inline new/edit modal."
   use JoyWeb, :live_view
-  alias Joy.Channels
+  alias Joy.{Channels, Organizations}
   alias Joy.Channels.Channel
 
   @impl true
@@ -14,6 +14,7 @@ defmodule JoyWeb.Channels.IndexLive do
      |> assign(:page_title, "Channels")
      |> assign(:channels, channels)
      |> assign(:running_ids, running_ids(channels))
+     |> assign(:organizations, Organizations.list_organizations())
      |> assign(:show_modal, false)
      |> assign(:form, nil)
      |> assign(:editing_channel, nil)}
@@ -134,6 +135,7 @@ defmodule JoyWeb.Channels.IndexLive do
             <thead>
               <tr>
                 <th>Name</th>
+                <th>Org</th>
                 <th>Port</th>
                 <th>Status</th>
                 <th>Transforms</th>
@@ -148,6 +150,10 @@ defmodule JoyWeb.Channels.IndexLive do
                     <p class="font-medium">{ch.name}</p>
                     <p :if={ch.description} class="text-xs text-base-content/50">{ch.description}</p>
                   </div>
+                </td>
+                <td>
+                  <span :if={ch.organization} class="badge badge-outline badge-sm">{ch.organization.name}</span>
+                  <span :if={!ch.organization} class="text-base-content/30 text-sm">—</span>
                 </td>
                 <td><span class="font-mono text-sm">{ch.mllp_port}</span></td>
                 <td>
@@ -189,6 +195,17 @@ defmodule JoyWeb.Channels.IndexLive do
           <.input field={@form[:name]} label="Name" placeholder="e.g. ADT Feed" />
           <.input field={@form[:description]} label="Description" placeholder="Optional description" />
           <.input field={@form[:mllp_port]} type="number" label="MLLP Port" placeholder="e.g. 2575" />
+          <div>
+            <label class="label"><span class="label-text">Organization (optional)</span></label>
+            <select name="channel[organization_id]" class="select select-bordered w-full">
+              <option value="">— None —</option>
+              <option :for={org <- @organizations}
+                      value={org.id}
+                      selected={to_string(Phoenix.HTML.Form.input_value(@form, :organization_id)) == to_string(org.id)}>
+                {org.name}
+              </option>
+            </select>
+          </div>
           <div class="modal-action">
             <button type="button" phx-click="close_modal" class="btn btn-ghost">Cancel</button>
             <button type="submit" class="btn btn-primary">Save</button>

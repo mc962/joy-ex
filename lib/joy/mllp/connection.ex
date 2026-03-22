@@ -46,9 +46,11 @@ defmodule Joy.MLLP.Connection do
 
   @impl true
   def init({channel_id, socket, transport}) do
-    channel = Joy.Repo.get!(Joy.Channels.Channel, channel_id)
+    channel =
+      Joy.Repo.get!(Joy.Channels.Channel, channel_id)
+      |> Joy.Repo.preload(:organization)
 
-    case check_peer_ip(socket, channel.allowed_ips, transport) do
+    case check_peer_ip(socket, Joy.Channels.effective_allowed_ips(channel), transport) do
       :ok ->
         set_active(socket, transport)
         {:ok, %{channel_id: channel_id, socket: socket, buffer: "", transport: transport}}

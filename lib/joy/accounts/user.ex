@@ -10,6 +10,8 @@ defmodule Joy.Accounts.User do
     field :authenticated_at, :utc_datetime, virtual: true
     field :is_admin, :boolean, default: false
 
+    belongs_to :organization, Joy.Organizations.Organization
+
     timestamps(type: :utc_datetime)
   end
 

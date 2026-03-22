@@ -46,6 +46,8 @@ defmodule Joy.Channels.Channel do
     field :alert_webhook_url, :string
     field :alert_cooldown_minutes, :integer, default: 60
 
+    belongs_to :organization, Joy.Organizations.Organization
+
     has_many :transform_steps, Joy.Channels.TransformStep, preload_order: [asc: :position]
     has_many :destination_configs, Joy.Channels.DestinationConfig
 
@@ -60,18 +62,13 @@ defmodule Joy.Channels.Channel do
       :tls_enabled, :tls_cert_pem, :tls_key_pem, :tls_ca_cert_pem,
       :tls_cert_expires_at, :tls_verify_peer,
       :alert_enabled, :alert_threshold, :alert_email, :alert_webhook_url,
-      :alert_cooldown_minutes
+      :alert_cooldown_minutes, :organization_id
     ])
     |> validate_required([:name, :mllp_port])
     |> validate_length(:name, min: 2, max: 100)
     |> validate_number(:mllp_port, greater_than_or_equal_to: 1024, less_than_or_equal_to: 65535)
     |> unique_constraint(:mllp_port, message: "is already in use by another channel")
-    |> validate_change(:allowed_ips, fn :allowed_ips, ips ->
-      invalid = Enum.reject(ips, &valid_ip_or_cidr?/1)
-      if invalid == [],
-        do: [],
-        else: [allowed_ips: "contains invalid entries: #{Enum.join(invalid, ", ")}"]
-    end)
+    |> Joy.IPValidator.validate_allowed_ips()
     |> validate_tls()
     |> validate_number(:alert_threshold, greater_than: 0)
     |> validate_number(:alert_cooldown_minutes, greater_than: 0)
@@ -98,15 +95,4 @@ defmodule Joy.Channels.Channel do
     end
   end
 
-  # Accepts plain IPs ("10.0.0.5") or CIDR notation ("10.0.0.0/24").
-  defp valid_ip_or_cidr?(entry) do
-    case String.split(entry, "/", parts: 2) do
-      [ip] ->
-        match?({:ok, _}, :inet.parse_address(to_charlist(ip)))
-
-      [ip, prefix] ->
-        match?({:ok, _}, :inet.parse_address(to_charlist(ip))) and
-          match?({n, ""} when n in 0..32, Integer.parse(prefix))
-    end
-  end
 end

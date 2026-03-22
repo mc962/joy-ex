@@ -13,7 +13,8 @@ defmodule Joy.Channels do
   import Ecto.Query
   alias Joy.{Repo, Channels.Channel, Channels.TransformStep, Channels.DestinationConfig}
 
-  @preload_query [transform_steps: from(t in TransformStep, order_by: [asc: t.position]),
+  @preload_query [:organization,
+                  transform_steps: from(t in TransformStep, order_by: [asc: t.position]),
                   destination_configs: from(d in DestinationConfig, order_by: [asc: d.id])]
 
   # --- Channels ---
@@ -78,6 +79,14 @@ defmodule Joy.Channels do
     |> Repo.update()
     |> tap_ok(&broadcast("channel_updated", &1))
   end
+
+  @doc """
+  Returns the effective allowed IP list for a channel, merging in org-level IPs.
+  An empty result means accept from any IP (no restriction).
+  """
+  def effective_allowed_ips(%Channel{allowed_ips: ch_ips, organization: %{allowed_ips: org_ips}}),
+    do: Enum.uniq(ch_ips ++ org_ips)
+  def effective_allowed_ips(%Channel{allowed_ips: ch_ips}), do: ch_ips
 
   @doc "Count all :failed message log entries across all channels."
   def count_failed_messages do

@@ -38,6 +38,7 @@ defmodule JoyWeb.Layouts do
           </p>
           <.nav_link icon="hero-squares-2x2" label="Dashboard" href={~p"/"} />
           <.nav_link icon="hero-arrows-right-left" label="Channels" href={~p"/channels"} />
+          <.nav_link icon="hero-building-office-2" label="Organizations" href={~p"/organizations"} />
 
           <p class="px-2 mt-6 mb-2 text-xs font-semibold uppercase tracking-widest text-base-content/40">
             Admin

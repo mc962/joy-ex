@@ -25,7 +25,8 @@ defmodule JoyWeb.DashboardLive do
      |> assign(:channel_stats, channel_stats)
      |> assign(:recent_errors, recent_errors)
      |> assign(:total_failed, total_failed)
-     |> assign(:expiring_certs, Joy.Channels.list_tls_expiring_soon(30))}
+     |> assign(:expiring_certs, Joy.Channels.list_tls_expiring_soon(30))
+     |> assign(:channel_groups, group_channels(channels))}
   end
 
   @impl true
@@ -42,6 +43,7 @@ defmodule JoyWeb.DashboardLive do
      |> assign(:channels, channels)
      |> assign(:running_ids, running_ids(channels))
      |> assign(:paused_ids, paused_ids(channels))
+     |> assign(:channel_groups, group_channels(channels))
      |> assign(:total_failed, Joy.MessageLog.count_all_failed())
      |> assign(:expiring_certs, Joy.Channels.list_tls_expiring_soon(30))}
   end
@@ -51,7 +53,8 @@ defmodule JoyWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:channels, channels)
-     |> assign(:paused_ids, paused_ids(channels))}
+     |> assign(:paused_ids, paused_ids(channels))
+     |> assign(:channel_groups, group_channels(channels))}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -108,6 +111,29 @@ defmodule JoyWeb.DashboardLive do
   end
 
   defp find_channel_id(_stats, _channels), do: nil
+
+  # Returns [{org_or_nil, [channel]}] — orgs first (sorted by name), ungrouped last.
+  defp group_channels(channels) do
+    grouped = Enum.group_by(channels, & &1.organization)
+    {nil_channels, org_groups} = Map.pop(grouped, nil, [])
+
+    sorted_orgs =
+      org_groups
+      |> Enum.sort_by(fn {org, _} -> org.name end)
+
+    sorted_orgs ++ (if nil_channels == [], do: [], else: [{nil, nil_channels}])
+  end
+
+  defp aggregate_today(channel_ids, channel_stats) do
+    Enum.reduce(channel_ids, %{recv: 0, proc: 0, fail: 0}, fn id, acc ->
+      stats = Map.get(channel_stats, id, %{})
+      %{
+        recv: acc.recv + (stats[:today_received] || 0),
+        proc: acc.proc + (stats[:today_processed] || 0),
+        fail: acc.fail + (stats[:today_failed] || 0)
+      }
+    end)
+  end
 
   @impl true
   def render(assigns) do
@@ -192,8 +218,36 @@ defmodule JoyWeb.DashboardLive do
                   <th class="text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody>
-                <tr :for={ch <- @channels} class="hover">
+              <tbody :for={{org, group_channels} <- @channel_groups}>
+                <%!-- Org header row --%>
+                <tr :if={org} class="bg-base-200/50">
+                  <td colspan="6" class="py-2 px-4">
+                    <div class="flex items-center justify-between">
+                      <div class="flex items-center gap-2">
+                        <.icon name="hero-building-office-2" class="w-4 h-4 text-base-content/40" />
+                        <.link navigate={~p"/organizations/#{org.id}"}
+                               class="font-semibold text-sm hover:underline">{org.name}</.link>
+                        <span class="badge badge-ghost badge-xs">{length(group_channels)}</span>
+                      </div>
+                      <div class="text-xs font-mono text-base-content/50">
+                        <% agg = aggregate_today(Enum.map(group_channels, & &1.id), @channel_stats) %>
+                        <span class="text-base-content/60">{agg.recv}</span>
+                        <span class="text-base-content/30 mx-0.5">/</span>
+                        <span class="text-success">{agg.proc}</span>
+                        <span class="text-base-content/30 mx-0.5">/</span>
+                        <span class="text-error">{agg.fail}</span>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+                <%!-- Ungrouped header row --%>
+                <tr :if={!org and @channel_groups != [{nil, group_channels}]} class="bg-base-200/30">
+                  <td colspan="6" class="py-2 px-4">
+                    <span class="text-xs font-medium text-base-content/40 uppercase tracking-wider">Ungrouped</span>
+                  </td>
+                </tr>
+                <%!-- Channel rows --%>
+                <tr :for={ch <- group_channels} class="hover">
                   <td>
                     <div>
                       <p class="font-medium">{ch.name}</p>

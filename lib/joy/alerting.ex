@@ -112,12 +112,22 @@ defmodule Joy.Alerting do
   end
 
   defp deliver(channel, subject, message) do
-    if channel.alert_email && channel.alert_email != "" do
-      send_email(channel.alert_email, subject, message)
+    if email = effective_field(channel, :alert_email) do
+      send_email(email, subject, message)
     end
 
-    if channel.alert_webhook_url && channel.alert_webhook_url != "" do
+    if effective_field(channel, :alert_webhook_url) do
       send_webhook(channel, subject, message)
+    end
+  end
+
+  # Returns the channel-level value if non-blank, otherwise falls back to org-level.
+  defp effective_field(channel, field) do
+    val = Map.get(channel, field)
+    if is_binary(val) and val != "" do
+      val
+    else
+      get_in(channel, [Access.key(:organization), Access.key(field)])
     end
   end
 
@@ -149,7 +159,7 @@ defmodule Joy.Alerting do
       timestamp:    DateTime.utc_now() |> DateTime.to_iso8601()
     })
 
-    case Req.post(channel.alert_webhook_url,
+    case Req.post(effective_field(channel, :alert_webhook_url),
            body: payload,
            headers: [{"content-type", "application/json"}],
            receive_timeout: 5_000) do
