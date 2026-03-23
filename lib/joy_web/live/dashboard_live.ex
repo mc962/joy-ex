@@ -61,32 +61,50 @@ defmodule JoyWeb.DashboardLive do
 
   @impl true
   def handle_event("start_channel", %{"id" => id}, socket) do
-    id = String.to_integer(id)
-    channel = Joy.Channels.get_channel!(id)
-    Joy.ChannelManager.start_channel(channel)
-    Joy.Channels.set_started(channel, true)
-    {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, id))}
+    if admin?(socket) do
+      id = String.to_integer(id)
+      channel = Joy.Channels.get_channel!(id)
+      Joy.ChannelManager.start_channel(channel)
+      Joy.Channels.set_started(channel, true)
+      {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, id))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("stop_channel", %{"id" => id}, socket) do
-    id = String.to_integer(id)
-    channel = Joy.Channels.get_channel!(id)
-    Joy.ChannelManager.stop_channel(id)
-    Joy.Channels.set_started(channel, false)
-    {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, id))}
+    if admin?(socket) do
+      id = String.to_integer(id)
+      channel = Joy.Channels.get_channel!(id)
+      Joy.ChannelManager.stop_channel(id)
+      Joy.Channels.set_started(channel, false)
+      {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, id))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("pause_channel", %{"id" => id}, socket) do
-    id = String.to_integer(id)
-    Joy.ChannelManager.pause_channel(id)
-    {:noreply, assign(socket, :paused_ids, MapSet.put(socket.assigns.paused_ids, id))}
+    if admin?(socket) do
+      id = String.to_integer(id)
+      Joy.ChannelManager.pause_channel(id)
+      {:noreply, assign(socket, :paused_ids, MapSet.put(socket.assigns.paused_ids, id))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("resume_channel", %{"id" => id}, socket) do
-    id = String.to_integer(id)
-    Joy.ChannelManager.resume_channel(id)
-    {:noreply, assign(socket, :paused_ids, MapSet.delete(socket.assigns.paused_ids, id))}
+    if admin?(socket) do
+      id = String.to_integer(id)
+      Joy.ChannelManager.resume_channel(id)
+      {:noreply, assign(socket, :paused_ids, MapSet.delete(socket.assigns.paused_ids, id))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
+
+  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
 
   defp running_ids(channels) do
     channels
@@ -275,18 +293,20 @@ defmodule JoyWeb.DashboardLive do
                   <td class="text-sm font-medium text-error">{@channel_stats[ch.id][:failed_count] || 0}</td>
                   <td>
                     <div class="flex items-center justify-end gap-1">
-                      <button :if={ch.id not in @running_ids}
-                              phx-click="start_channel" phx-value-id={ch.id}
-                              class="btn btn-ghost btn-xs text-success">Start</button>
-                      <button :if={ch.id in @running_ids and ch.id not in @paused_ids}
-                              phx-click="pause_channel" phx-value-id={ch.id}
-                              class="btn btn-ghost btn-xs text-warning">Pause</button>
-                      <button :if={ch.id in @running_ids and ch.id in @paused_ids}
-                              phx-click="resume_channel" phx-value-id={ch.id}
-                              class="btn btn-ghost btn-xs text-success">Resume</button>
-                      <button :if={ch.id in @running_ids}
-                              phx-click="stop_channel" phx-value-id={ch.id}
-                              class="btn btn-ghost btn-xs text-error">Stop</button>
+                      <%= if @current_scope.user.is_admin do %>
+                        <button :if={ch.id not in @running_ids}
+                                phx-click="start_channel" phx-value-id={ch.id}
+                                class="btn btn-ghost btn-xs text-success">Start</button>
+                        <button :if={ch.id in @running_ids and ch.id not in @paused_ids}
+                                phx-click="pause_channel" phx-value-id={ch.id}
+                                class="btn btn-ghost btn-xs text-warning">Pause</button>
+                        <button :if={ch.id in @running_ids and ch.id in @paused_ids}
+                                phx-click="resume_channel" phx-value-id={ch.id}
+                                class="btn btn-ghost btn-xs text-success">Resume</button>
+                        <button :if={ch.id in @running_ids}
+                                phx-click="stop_channel" phx-value-id={ch.id}
+                                class="btn btn-ghost btn-xs text-error">Stop</button>
+                      <% end %>
                       <.link navigate={~p"/channels/#{ch.id}"} class="btn btn-ghost btn-xs">View</.link>
                     </div>
                   </td>

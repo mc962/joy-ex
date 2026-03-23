@@ -18,12 +18,7 @@ defmodule Joy.Crypto do
 
   @doc "Encrypt plaintext. Returns iv <> tag <> ciphertext binary."
   @spec encrypt(binary()) :: binary()
-  def encrypt(plaintext) when is_binary(plaintext) do
-    iv = :crypto.strong_rand_bytes(12)
-    {ciphertext, tag} =
-      :crypto.crypto_one_time_aead(:aes_256_gcm, key(), iv, plaintext, @aad, true)
-    iv <> tag <> ciphertext
-  end
+  def encrypt(plaintext) when is_binary(plaintext), do: encrypt_with(plaintext, key())
 
   @doc "Decrypt a blob produced by encrypt/1."
   @spec decrypt(binary()) :: {:ok, binary()} | {:error, :decryption_failed}
@@ -38,13 +33,21 @@ defmodule Joy.Crypto do
     end
   end
 
-  defp decrypt_with(<<iv::binary-12, tag::binary-16, ciphertext::binary>>, k) do
+  @doc false
+  def encrypt_with(plaintext, key) when is_binary(plaintext) and is_binary(key) do
+    iv = :crypto.strong_rand_bytes(12)
+    {ciphertext, tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, @aad, true)
+    iv <> tag <> ciphertext
+  end
+
+  @doc false
+  def decrypt_with(<<iv::binary-12, tag::binary-16, ciphertext::binary>>, k) do
     case :crypto.crypto_one_time_aead(:aes_256_gcm, k, iv, ciphertext, @aad, tag, false) do
       plaintext when is_binary(plaintext) -> {:ok, plaintext}
       _ -> {:error, :decryption_failed}
     end
   end
-  defp decrypt_with(_, _), do: {:error, :decryption_failed}
+  def decrypt_with(_, _), do: {:error, :decryption_failed}
 
   defp key, do: Application.fetch_env!(:joy, :encryption_key) |> Base.decode64!()
 

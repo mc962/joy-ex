@@ -31,6 +31,8 @@ defmodule JoyWeb.Organizations.ShowLive do
 
   def handle_info(_, socket), do: {:noreply, socket}
 
+  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
+
   # --- General section ---
 
   @impl true
@@ -40,48 +42,60 @@ defmodule JoyWeb.Organizations.ShowLive do
   end
 
   def handle_event("save_general", %{"organization" => params}, socket) do
-    case Organizations.update_organization(socket.assigns.org, params) do
-      {:ok, org} ->
-        refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
-        {:noreply,
-         socket
-         |> assign(:org, refreshed)
-         |> assign(:general_form, to_form(Organization.changeset(refreshed, %{})))
-         |> put_flash(:info, "Organization updated")}
+    if admin?(socket) do
+      case Organizations.update_organization(socket.assigns.org, params) do
+        {:ok, org} ->
+          refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
+          {:noreply,
+           socket
+           |> assign(:org, refreshed)
+           |> assign(:general_form, to_form(Organization.changeset(refreshed, %{})))
+           |> put_flash(:info, "Organization updated")}
 
-      {:error, cs} ->
-        {:noreply, assign(socket, :general_form, to_form(cs))}
+        {:error, cs} ->
+          {:noreply, assign(socket, :general_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   # --- IP allowlist section ---
 
   def handle_event("add_allowed_ip", %{"ip" => raw_ip}, socket) do
-    ip = String.trim(raw_ip)
-    org = socket.assigns.org
+    if admin?(socket) do
+      ip = String.trim(raw_ip)
+      org = socket.assigns.org
 
-    case Organizations.update_organization(org, %{allowed_ips: org.allowed_ips ++ [ip]}) do
-      {:ok, updated} ->
-        refreshed = Organizations.get_organization!(updated.id) |> Joy.Repo.preload(:channels)
-        {:noreply, assign(socket, org: refreshed, ip_error: nil)}
+      case Organizations.update_organization(org, %{allowed_ips: org.allowed_ips ++ [ip]}) do
+        {:ok, updated} ->
+          refreshed = Organizations.get_organization!(updated.id) |> Joy.Repo.preload(:channels)
+          {:noreply, assign(socket, org: refreshed, ip_error: nil)}
 
-      {:error, cs} ->
-        msg = cs.errors[:allowed_ips] |> then(fn {m, _} -> m end)
-        {:noreply, assign(socket, :ip_error, msg)}
+        {:error, cs} ->
+          msg = cs.errors[:allowed_ips] |> then(fn {m, _} -> m end)
+          {:noreply, assign(socket, :ip_error, msg)}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("remove_allowed_ip", %{"ip" => ip}, socket) do
-    org = socket.assigns.org
-    new_ips = Enum.reject(org.allowed_ips, &(&1 == ip))
+    if admin?(socket) do
+      org = socket.assigns.org
+      new_ips = Enum.reject(org.allowed_ips, &(&1 == ip))
 
-    case Organizations.update_organization(org, %{allowed_ips: new_ips}) do
-      {:ok, updated} ->
-        refreshed = Organizations.get_organization!(updated.id) |> Joy.Repo.preload(:channels)
-        {:noreply, assign(socket, org: refreshed, ip_error: nil)}
+      case Organizations.update_organization(org, %{allowed_ips: new_ips}) do
+        {:ok, updated} ->
+          refreshed = Organizations.get_organization!(updated.id) |> Joy.Repo.preload(:channels)
+          {:noreply, assign(socket, org: refreshed, ip_error: nil)}
 
-      {:error, _} ->
-        {:noreply, socket}
+        {:error, _} ->
+          {:noreply, socket}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
@@ -93,17 +107,21 @@ defmodule JoyWeb.Organizations.ShowLive do
   end
 
   def handle_event("save_alert", %{"organization" => params}, socket) do
-    case Organizations.update_organization(socket.assigns.org, params) do
-      {:ok, org} ->
-        refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
-        {:noreply,
-         socket
-         |> assign(:org, refreshed)
-         |> assign(:alert_form, to_form(Organization.changeset(refreshed, %{})))
-         |> put_flash(:info, "Alert config saved")}
+    if admin?(socket) do
+      case Organizations.update_organization(socket.assigns.org, params) do
+        {:ok, org} ->
+          refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
+          {:noreply,
+           socket
+           |> assign(:org, refreshed)
+           |> assign(:alert_form, to_form(Organization.changeset(refreshed, %{})))
+           |> put_flash(:info, "Alert config saved")}
 
-      {:error, cs} ->
-        {:noreply, assign(socket, :alert_form, to_form(cs))}
+        {:error, cs} ->
+          {:noreply, assign(socket, :alert_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
@@ -115,17 +133,21 @@ defmodule JoyWeb.Organizations.ShowLive do
   end
 
   def handle_event("save_tls", %{"organization" => params}, socket) do
-    case Organizations.update_organization(socket.assigns.org, params) do
-      {:ok, org} ->
-        refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
-        {:noreply,
-         socket
-         |> assign(:org, refreshed)
-         |> assign(:tls_form, to_form(Organization.changeset(refreshed, %{})))
-         |> put_flash(:info, "TLS CA cert saved")}
+    if admin?(socket) do
+      case Organizations.update_organization(socket.assigns.org, params) do
+        {:ok, org} ->
+          refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
+          {:noreply,
+           socket
+           |> assign(:org, refreshed)
+           |> assign(:tls_form, to_form(Organization.changeset(refreshed, %{})))
+           |> put_flash(:info, "TLS CA cert saved")}
 
-      {:error, cs} ->
-        {:noreply, assign(socket, :tls_form, to_form(cs))}
+        {:error, cs} ->
+          {:noreply, assign(socket, :tls_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
@@ -142,7 +164,8 @@ defmodule JoyWeb.Organizations.ShowLive do
         <span class="text-base-content font-medium">{@org.name}</span>
       </div>
 
-      <%!-- General --%>
+      <%!-- General (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body">
           <h2 class="card-title text-base mb-4">General</h2>
@@ -158,6 +181,7 @@ defmodule JoyWeb.Organizations.ShowLive do
           </.form>
         </div>
       </div>
+      <% end %>
 
       <%!-- Member Channels --%>
       <div class="card bg-base-100 border border-base-300">
@@ -192,7 +216,8 @@ defmodule JoyWeb.Organizations.ShowLive do
         </div>
       </div>
 
-      <%!-- IP Allowlist --%>
+      <%!-- IP Allowlist (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body">
           <h2 class="card-title text-base mb-1">IP Allowlist</h2>
@@ -222,7 +247,7 @@ defmodule JoyWeb.Organizations.ShowLive do
         </div>
       </div>
 
-      <%!-- Alert Config --%>
+      <%!-- Alert Config (admin only) --%>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body">
           <h2 class="card-title text-base mb-1">Alert Config</h2>
@@ -239,7 +264,7 @@ defmodule JoyWeb.Organizations.ShowLive do
         </div>
       </div>
 
-      <%!-- TLS CA Cert --%>
+      <%!-- TLS CA Cert (admin only) --%>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body">
           <h2 class="card-title text-base mb-1">TLS CA Certificate</h2>
@@ -261,6 +286,7 @@ defmodule JoyWeb.Organizations.ShowLive do
           </.form>
         </div>
       </div>
+      <% end %>
 
     </div>
     </Layouts.app>

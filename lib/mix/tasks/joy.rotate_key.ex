@@ -29,8 +29,6 @@ defmodule Mix.Tasks.Joy.RotateKey do
     {"retention_settings", "aws_secret_access_key"}
   ]
 
-  @aad "joy_hl7_engine_v1"
-
   @impl true
   def run(args) do
     {opts, _} =
@@ -132,18 +130,7 @@ defmodule Mix.Tasks.Joy.RotateKey do
     end
   end
 
-  defp decrypt_with(<<iv::binary-12, tag::binary-16, ct::binary>>, key) do
-    case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ct, @aad, tag, false) do
-      pt when is_binary(pt) -> {:ok, pt}
-      _ -> {:error, :decryption_failed}
-    end
-  end
+  defp decrypt_with(blob, key), do: Joy.Crypto.decrypt_with(blob, key)
 
-  defp decrypt_with(_, _), do: {:error, :decryption_failed}
-
-  defp encrypt_with(plaintext, key) do
-    iv = :crypto.strong_rand_bytes(12)
-    {ct, tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, @aad, true)
-    iv <> tag <> ct
-  end
+  defp encrypt_with(plaintext, key), do: Joy.Crypto.encrypt_with(plaintext, key)
 end

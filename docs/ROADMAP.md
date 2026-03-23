@@ -1,6 +1,6 @@
 # Joy Roadmap
 
-All 15 items are complete.
+Items 1–16 are complete. Items 17–22 are the next wave, in rough priority order.
 
 ---
 
@@ -188,3 +188,64 @@ All 15 items are complete.
 - `Joy.ChannelSupervisor` configured with `distribution_strategy: Joy.PinnedDistribution`
 - Channel show page: node picker dropdown (admin-only) populated from `[node() | Node.list()]`; saving restarts the channel if running so Horde re-places it on the pinned node
 - IP Allowlist and TLS Configuration sections also restricted to admin users (template guard + event handler check), forward-proofing for when non-admin read access is added
+
+---
+
+## 16. Non-Admin Read Access ✅ Implemented
+
+**Why:** Every authenticated user previously required `is_admin: true` via the blanket `JoyWeb.AdminAuth` on-mount hook. In a real deployment, operators (on-call, support, read-only observers) need to view the dashboard, message logs, and channel status without the ability to change configuration.
+
+**What was built:**
+- Router split into two live sessions: `:app` (any authenticated user) and `:admin` (requires `is_admin` via `JoyWeb.AdminAuth`). Admin-only routes (`/users`, `/tools/*`) moved to `:admin`. All channel, organization, and message routes remain in `:app`.
+- Defense-in-depth: template guards (`if @current_scope.user.is_admin`) hide admin-only controls; event handler guards (`if admin?(socket)`) block mutations even from crafted WebSocket messages.
+- Non-admin view: dashboard shows channel list read-only; channel show displays status, stats, transforms list, and destinations list — no add/edit/delete buttons; no IP allowlist, TLS, Alerting, Dispatch, or Node Pinning sections.
+- Message retry (`retry`, `retry_all_failed`) is intentionally NOT admin-gated — on-call and support staff can retry failed messages as a recovery action.
+- Simplify fixes bundled in: stale `socket.assigns.running?` in `save_pin` replaced with `Joy.ChannelManager.channel_running?`; duplicated stop+restart logic extracted to `restart_if_running/2` private helper (used by `save_tls` and `save_pin`); `Joy.Crypto.encrypt_with/2` and `decrypt_with/2` promoted to public; `mix joy.rotate_key` removes its duplicate crypto and delegates to `Joy.Crypto`.
+
+---
+
+## 17. Audit Logging ⏳ Planned
+
+**Why:** There is no record of who changed what or when. In a HIPAA context, configuration changes to encryption keys, TLS certificates, IP allowlists, and retention settings are material events that should be traceable to a specific user and timestamp.
+
+**Plan:** Add an `audit_log_entries` table (`actor_id`, `action`, `resource_type`, `resource_id`, `changes` jsonb, `inserted_at`). Write entries on all admin-gated mutations (channel config, org config, retention settings, user promotion/demotion, key rotation). Expose a `/audit` LiveView for admins listing recent entries with filtering by actor, resource type, and date range.
+
+---
+
+## 18. HL7 Acknowledgement Customization ⏳ Planned
+
+**Why:** Joy currently returns a hardcoded AA (Application Accept) ACK for every received message. Some downstream interfaces require AE (Application Error) or AR (Application Reject) responses under specific conditions, and some systems need custom MSH fields (sending application, facility) in the ACK to route it correctly.
+
+**Plan:** Add per-channel ACK configuration: acknowledgement code override (AA/AE/AR), and template fields for MSH.3 (sending application) and MSH.4 (sending facility) in the ACK. Expose the config on the channel show page. `Joy.MLLP.Connection` reads the channel's ACK config when constructing the response.
+
+---
+
+## 19. Metrics Export ⏳ Planned
+
+**Why:** `Joy.ChannelStats` tracks per-channel received/processed/failed counts in ETS but the data is only visible in the LiveView dashboard. Production deployments need to scrape these metrics into Prometheus or push them to an OpenTelemetry collector for alerting and long-term trending — without polling the web UI.
+
+**Plan:** Add a `/metrics` endpoint (Plug, outside the authenticated LiveView scope) that emits Prometheus text format: `joy_channel_messages_total{channel, status}` counters and a `joy_channel_queue_depth{channel}` gauge. Wire `Joy.ChannelStats` to also emit telemetry events so an optional OpenTelemetry exporter can consume them without changing the scrape path.
+
+---
+
+## 20. Multi-Tenancy / Scoped Auth ⏳ Planned
+
+**Why:** `organization_id` is already a foreign key on both `users` and `channels`, but it is not enforced in any query — a user belonging to org A can see and modify channels belonging to org B. This is acceptable in a single-tenant deployment but blocks any multi-tenant or white-label use.
+
+**Plan:** Thread `current_scope` (already carrying `user` and `organization_id`) through all context queries. `Joy.Channels.list_channels/1`, `get_channel!/2`, and all mutations gain a scope argument and add `WHERE organization_id = $n` (or allow nil org to see everything, preserving single-tenant behaviour). Admin users bypass org scoping. Update LiveViews to pass `current_scope` into context calls.
+
+---
+
+## 21. REST API Layer ⏳ Planned
+
+**Why:** The LiveView UI is the only way to manage Joy today. Integrators need to provision channels, manage destinations, trigger retries, and query message log entries programmatically — for IaC tooling, CI pipelines, and embedding Joy into broader platform automation.
+
+**Plan:** Add a `/api/v1` scope in the router protected by Bearer token authentication (API keys stored as hashed tokens in a new `api_tokens` table, scoped to a user or org). Expose JSON endpoints covering the core resources: channels (CRUD, start/stop/pause/resume), organizations (CRUD), destinations (CRUD), message log (list, retry), and retention (trigger purge). Controller logic delegates to the existing context modules — no new business logic, just a new transport layer. API tokens are managed from the user settings page.
+
+---
+
+## 22. OpenAPI / Swagger Docs ⏳ Planned
+
+**Why:** A REST API without a machine-readable schema forces integrators to read source code. An OpenAPI spec enables generated client SDKs, Postman collections, and in-browser interactive docs with no extra integration work.
+
+**Plan:** Add `open_api_spex` as a dependency. Annotate API controllers with request/response schemas. Expose the spec at `/api/v1/openapi.json` and mount Swagger UI at `/api/docs` (unauthenticated, read-only). Schemas live in `lib/joy_web/api/schemas/` alongside the controllers. Implement item 21 first — OpenAPI annotations are added as part of or immediately after the controller layer is in place.

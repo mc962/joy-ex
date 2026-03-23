@@ -30,8 +30,12 @@ defmodule JoyWeb.Channels.IndexLive do
 
   @impl true
   def handle_event("new_channel", _, socket) do
-    cs = Channel.changeset(%Channel{}, %{})
-    {:noreply, assign(socket, show_modal: true, form: to_form(cs), editing_channel: nil)}
+    if admin?(socket) do
+      cs = Channel.changeset(%Channel{}, %{})
+      {:noreply, assign(socket, show_modal: true, form: to_form(cs), editing_channel: nil)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("edit_channel", %{"id" => id}, socket) do
@@ -51,48 +55,64 @@ defmodule JoyWeb.Channels.IndexLive do
   end
 
   def handle_event("save", %{"channel" => params}, socket) do
-    result =
-      case socket.assigns.editing_channel do
-        nil -> Channels.create_channel(params)
-        ch  -> Channels.update_channel(ch, params)
+    if admin?(socket) do
+      result =
+        case socket.assigns.editing_channel do
+          nil -> Channels.create_channel(params)
+          ch  -> Channels.update_channel(ch, params)
+        end
+
+      case result do
+        {:ok, _} ->
+          channels = Channels.list_channels()
+          {:noreply,
+           socket
+           |> assign(:show_modal, false)
+           |> assign(:channels, channels)
+           |> assign(:running_ids, running_ids(channels))
+           |> put_flash(:info, "Channel saved")}
+
+        {:error, cs} ->
+          {:noreply, assign(socket, :form, to_form(cs))}
       end
-
-    case result do
-      {:ok, _} ->
-        channels = Channels.list_channels()
-        {:noreply,
-         socket
-         |> assign(:show_modal, false)
-         |> assign(:channels, channels)
-         |> assign(:running_ids, running_ids(channels))
-         |> put_flash(:info, "Channel saved")}
-
-      {:error, cs} ->
-        {:noreply, assign(socket, :form, to_form(cs))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("delete", %{"id" => id}, socket) do
-    channel = Channels.get_channel!(String.to_integer(id))
-    if Joy.ChannelManager.channel_running?(channel.id), do: Joy.ChannelManager.stop_channel(channel.id)
-    Channels.delete_channel(channel)
-    channels = Channels.list_channels()
-    {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
+    if admin?(socket) do
+      channel = Channels.get_channel!(String.to_integer(id))
+      if Joy.ChannelManager.channel_running?(channel.id), do: Joy.ChannelManager.stop_channel(channel.id)
+      Channels.delete_channel(channel)
+      channels = Channels.list_channels()
+      {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("start_channel", %{"id" => id}, socket) do
-    channel = Channels.get_channel!(String.to_integer(id))
-    Joy.ChannelManager.start_channel(channel)
-    Channels.set_started(channel, true)
-    {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, channel.id))}
+    if admin?(socket) do
+      channel = Channels.get_channel!(String.to_integer(id))
+      Joy.ChannelManager.start_channel(channel)
+      Channels.set_started(channel, true)
+      {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, channel.id))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("stop_channel", %{"id" => id}, socket) do
-    id = String.to_integer(id)
-    channel = Channels.get_channel!(id)
-    Joy.ChannelManager.stop_channel(id)
-    Channels.set_started(channel, false)
-    {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, channel.id))}
+    if admin?(socket) do
+      id = String.to_integer(id)
+      channel = Channels.get_channel!(id)
+      Joy.ChannelManager.stop_channel(id)
+      Channels.set_started(channel, false)
+      {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, channel.id))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   @impl true
@@ -119,7 +139,7 @@ defmodule JoyWeb.Channels.IndexLive do
         <p class="text-sm text-base-content/60">
           {length(@channels)} channel{if length(@channels) != 1, do: "s", else: ""} configured
         </p>
-        <button phx-click="new_channel" class="btn btn-primary btn-sm">
+        <button :if={@current_scope.user.is_admin} phx-click="new_channel" class="btn btn-primary btn-sm">
           <.icon name="hero-plus" class="w-4 h-4" /> New Channel
         </button>
       </div>
@@ -164,18 +184,22 @@ defmodule JoyWeb.Channels.IndexLive do
                 <td class="text-sm text-base-content/60">{length(ch.destination_configs)}</td>
                 <td>
                   <div class="flex items-center justify-end gap-1">
-                    <button :if={ch.id not in @running_ids}
-                            phx-click="start_channel" phx-value-id={ch.id}
-                            class="btn btn-ghost btn-xs text-success">Start</button>
-                    <button :if={ch.id in @running_ids}
-                            phx-click="stop_channel" phx-value-id={ch.id}
-                            class="btn btn-ghost btn-xs">Stop</button>
+                    <%= if @current_scope.user.is_admin do %>
+                      <button :if={ch.id not in @running_ids}
+                              phx-click="start_channel" phx-value-id={ch.id}
+                              class="btn btn-ghost btn-xs text-success">Start</button>
+                      <button :if={ch.id in @running_ids}
+                              phx-click="stop_channel" phx-value-id={ch.id}
+                              class="btn btn-ghost btn-xs">Stop</button>
+                    <% end %>
                     <.link navigate={~p"/channels/#{ch.id}"} class="btn btn-ghost btn-xs">View</.link>
-                    <button phx-click="edit_channel" phx-value-id={ch.id}
-                            class="btn btn-ghost btn-xs">Edit</button>
-                    <button phx-click="delete" phx-value-id={ch.id}
-                            data-confirm={"Delete #{ch.name}?"}
-                            class="btn btn-ghost btn-xs text-error">Delete</button>
+                    <%= if @current_scope.user.is_admin do %>
+                      <button phx-click="edit_channel" phx-value-id={ch.id}
+                              class="btn btn-ghost btn-xs">Edit</button>
+                      <button phx-click="delete" phx-value-id={ch.id}
+                              data-confirm={"Delete #{ch.name}?"}
+                              class="btn btn-ghost btn-xs text-error">Delete</button>
+                    <% end %>
                   </div>
                 </td>
               </tr>
@@ -217,6 +241,8 @@ defmodule JoyWeb.Channels.IndexLive do
     </Layouts.app>
     """
   end
+
+  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
 
   defp running_ids(channels) do
     channels

@@ -28,8 +28,12 @@ defmodule JoyWeb.Organizations.IndexLive do
 
   @impl true
   def handle_event("new_org", _, socket) do
-    cs = Organization.changeset(%Organization{}, %{})
-    {:noreply, assign(socket, show_modal: true, form: to_form(cs), editing_org: nil)}
+    if admin?(socket) do
+      cs = Organization.changeset(%Organization{}, %{})
+      {:noreply, assign(socket, show_modal: true, form: to_form(cs), editing_org: nil)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("close_modal", _, socket) do
@@ -43,30 +47,38 @@ defmodule JoyWeb.Organizations.IndexLive do
   end
 
   def handle_event("save", %{"organization" => params}, socket) do
-    result =
-      case socket.assigns.editing_org do
-        nil -> Organizations.create_organization(params)
-        org -> Organizations.update_organization(org, params)
+    if admin?(socket) do
+      result =
+        case socket.assigns.editing_org do
+          nil -> Organizations.create_organization(params)
+          org -> Organizations.update_organization(org, params)
+        end
+
+      case result do
+        {:ok, org} ->
+          {:noreply,
+           socket
+           |> assign(:show_modal, false)
+           |> assign(:organizations, Organizations.list_organizations())
+           |> put_flash(:info, "Organization saved")
+           |> push_navigate(to: ~p"/organizations/#{org.id}")}
+
+        {:error, cs} ->
+          {:noreply, assign(socket, :form, to_form(cs))}
       end
-
-    case result do
-      {:ok, org} ->
-        {:noreply,
-         socket
-         |> assign(:show_modal, false)
-         |> assign(:organizations, Organizations.list_organizations())
-         |> put_flash(:info, "Organization saved")
-         |> push_navigate(to: ~p"/organizations/#{org.id}")}
-
-      {:error, cs} ->
-        {:noreply, assign(socket, :form, to_form(cs))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("delete", %{"id" => id}, socket) do
-    org = Organizations.get_organization!(String.to_integer(id))
-    {:ok, _} = Organizations.delete_organization(org)
-    {:noreply, assign(socket, :organizations, Organizations.list_organizations())}
+    if admin?(socket) do
+      org = Organizations.get_organization!(String.to_integer(id))
+      {:ok, _} = Organizations.delete_organization(org)
+      {:noreply, assign(socket, :organizations, Organizations.list_organizations())}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   @impl true
@@ -75,6 +87,8 @@ defmodule JoyWeb.Organizations.IndexLive do
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
+
+  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
 
   @impl true
   def render(assigns) do
@@ -85,7 +99,7 @@ defmodule JoyWeb.Organizations.IndexLive do
         <p class="text-sm text-base-content/60">
           {length(@organizations)} organization{if length(@organizations) != 1, do: "s", else: ""} configured
         </p>
-        <button phx-click="new_org" class="btn btn-primary btn-sm">
+        <button :if={@current_scope.user.is_admin} phx-click="new_org" class="btn btn-primary btn-sm">
           <.icon name="hero-plus" class="w-4 h-4" /> New Organization
         </button>
       </div>
@@ -121,7 +135,8 @@ defmodule JoyWeb.Organizations.IndexLive do
                 <td>
                   <div class="flex items-center justify-end gap-1">
                     <.link navigate={~p"/organizations/#{org.id}"} class="btn btn-ghost btn-xs">View</.link>
-                    <button phx-click="delete" phx-value-id={org.id}
+                    <button :if={@current_scope.user.is_admin}
+                            phx-click="delete" phx-value-id={org.id}
                             data-confirm={"Delete #{org.name}? Channels will be ungrouped."}
                             class="btn btn-ghost btn-xs text-error">Delete</button>
                   </div>

@@ -103,29 +103,45 @@ defmodule JoyWeb.Channels.ShowLive do
 
   @impl true
   def handle_event("start_channel", _, socket) do
-    channel = socket.assigns.channel
-    Joy.ChannelManager.start_channel(channel)
-    Channels.set_started(channel, true)
-    {:noreply, assign(socket, :running?, true)}
+    if admin?(socket) do
+      channel = socket.assigns.channel
+      Joy.ChannelManager.start_channel(channel)
+      Channels.set_started(channel, true)
+      {:noreply, assign(socket, :running?, true)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("stop_channel", _, socket) do
-    channel = socket.assigns.channel
-    Joy.ChannelManager.stop_channel(channel.id)
-    Channels.set_started(channel, false)
-    {:noreply, assign(socket, :running?, false)}
+    if admin?(socket) do
+      channel = socket.assigns.channel
+      Joy.ChannelManager.stop_channel(channel.id)
+      Channels.set_started(channel, false)
+      {:noreply, assign(socket, :running?, false)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("pause_channel", _, socket) do
-    Joy.ChannelManager.pause_channel(socket.assigns.channel.id)
-    channel = Channels.get_channel!(socket.assigns.channel.id)
-    {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, true))}
+    if admin?(socket) do
+      Joy.ChannelManager.pause_channel(socket.assigns.channel.id)
+      channel = Channels.get_channel!(socket.assigns.channel.id)
+      {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, true))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("resume_channel", _, socket) do
-    Joy.ChannelManager.resume_channel(socket.assigns.channel.id)
-    channel = Channels.get_channel!(socket.assigns.channel.id)
-    {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, false))}
+    if admin?(socket) do
+      Joy.ChannelManager.resume_channel(socket.assigns.channel.id)
+      channel = Channels.get_channel!(socket.assigns.channel.id)
+      {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, false))}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("close_transform_modal", _, socket) do
@@ -141,94 +157,118 @@ defmodule JoyWeb.Channels.ShowLive do
   end
 
   def handle_event("save_transform", %{"transform_step" => params}, socket) do
-    result = Channels.upsert_transform_step(socket.assigns.channel.id, params)
-    case result do
-      {:ok, _} ->
-        Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
-        channel = Channels.get_channel!(socket.assigns.channel.id)
-        {:noreply,
-         socket
-         |> assign(:channel, channel)
-         |> push_patch(to: ~p"/channels/#{channel.id}")}
+    if admin?(socket) do
+      result = Channels.upsert_transform_step(socket.assigns.channel.id, params)
+      case result do
+        {:ok, _} ->
+          Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+          channel = Channels.get_channel!(socket.assigns.channel.id)
+          {:noreply,
+           socket
+           |> assign(:channel, channel)
+           |> push_patch(to: ~p"/channels/#{channel.id}")}
 
-      {:error, cs} ->
-        {:noreply, assign(socket, :transform_form, to_form(cs))}
+        {:error, cs} ->
+          {:noreply, assign(socket, :transform_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("delete_transform", %{"id" => id}, socket) do
-    step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
-    if step, do: Channels.delete_transform_step(step)
-    channel = Channels.get_channel!(socket.assigns.channel.id)
-    remaining_ids = Enum.map(channel.transform_steps, & &1.id)
-    if remaining_ids != [], do: Channels.reorder_transform_steps(socket.assigns.channel.id, remaining_ids)
-    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
-    channel = Channels.get_channel!(socket.assigns.channel.id)
-    {:noreply, assign(socket, :channel, channel)}
-  end
-
-  def handle_event("toggle_transform", %{"id" => id}, socket) do
-    step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
-    if step do
-      Channels.upsert_transform_step(socket.assigns.channel.id, %{"id" => step.id, "enabled" => !step.enabled})
-    end
-    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
-    channel = Channels.get_channel!(socket.assigns.channel.id)
-    {:noreply, assign(socket, :channel, channel)}
-  end
-
-  def handle_event("move_transform", %{"id" => id, "value" => pos_str}, socket) do
-    steps = socket.assigns.channel.transform_steps
-    step = Enum.find(steps, &(to_string(&1.id) == id))
-
-    if step do
-      target =
-        pos_str
-        |> Integer.parse()
-        |> case do
-          {n, _} -> n - 1
-          :error -> step.position
-        end
-        |> max(0)
-        |> min(length(steps) - 1)
-
-      ordered_ids =
-        steps
-        |> Enum.reject(&(&1.id == step.id))
-        |> List.insert_at(target, step)
-        |> Enum.map(& &1.id)
-
-      Channels.reorder_transform_steps(socket.assigns.channel.id, ordered_ids)
+    if admin?(socket) do
+      step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
+      if step, do: Channels.delete_transform_step(step)
+      channel = Channels.get_channel!(socket.assigns.channel.id)
+      remaining_ids = Enum.map(channel.transform_steps, & &1.id)
+      if remaining_ids != [], do: Channels.reorder_transform_steps(socket.assigns.channel.id, remaining_ids)
       Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
       channel = Channels.get_channel!(socket.assigns.channel.id)
       {:noreply, assign(socket, :channel, channel)}
     else
-      {:noreply, socket}
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
+  end
+
+  def handle_event("toggle_transform", %{"id" => id}, socket) do
+    if admin?(socket) do
+      step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
+      if step do
+        Channels.upsert_transform_step(socket.assigns.channel.id, %{"id" => step.id, "enabled" => !step.enabled})
+      end
+      Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+      channel = Channels.get_channel!(socket.assigns.channel.id)
+      {:noreply, assign(socket, :channel, channel)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
+  end
+
+  def handle_event("move_transform", %{"id" => id, "value" => pos_str}, socket) do
+    if admin?(socket) do
+      steps = socket.assigns.channel.transform_steps
+      step = Enum.find(steps, &(to_string(&1.id) == id))
+
+      if step do
+        target =
+          pos_str
+          |> Integer.parse()
+          |> case do
+            {n, _} -> n - 1
+            :error -> step.position
+          end
+          |> max(0)
+          |> min(length(steps) - 1)
+
+        ordered_ids =
+          steps
+          |> Enum.reject(&(&1.id == step.id))
+          |> List.insert_at(target, step)
+          |> Enum.map(& &1.id)
+
+        Channels.reorder_transform_steps(socket.assigns.channel.id, ordered_ids)
+        Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+        channel = Channels.get_channel!(socket.assigns.channel.id)
+        {:noreply, assign(socket, :channel, channel)}
+      else
+        {:noreply, socket}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("save_destination", %{"destination_config" => params}, socket) do
-    result = Channels.upsert_destination_config(socket.assigns.channel.id, params)
-    case result do
-      {:ok, _} ->
-        Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
-        channel = Channels.get_channel!(socket.assigns.channel.id)
-        {:noreply,
-         socket
-         |> assign(:channel, channel)
-         |> push_patch(to: ~p"/channels/#{channel.id}")}
+    if admin?(socket) do
+      result = Channels.upsert_destination_config(socket.assigns.channel.id, params)
+      case result do
+        {:ok, _} ->
+          Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+          channel = Channels.get_channel!(socket.assigns.channel.id)
+          {:noreply,
+           socket
+           |> assign(:channel, channel)
+           |> push_patch(to: ~p"/channels/#{channel.id}")}
 
-      {:error, cs} ->
-        {:noreply, assign(socket, :dest_form, to_form(cs))}
+        {:error, cs} ->
+          {:noreply, assign(socket, :dest_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("delete_destination", %{"id" => id}, socket) do
-    dest = Enum.find(socket.assigns.channel.destination_configs, &(to_string(&1.id) == id))
-    if dest, do: Channels.delete_destination_config(dest)
-    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
-    channel = Channels.get_channel!(socket.assigns.channel.id)
-    {:noreply, assign(socket, :channel, channel)}
+    if admin?(socket) do
+      dest = Enum.find(socket.assigns.channel.destination_configs, &(to_string(&1.id) == id))
+      if dest, do: Channels.delete_destination_config(dest)
+      Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+      channel = Channels.get_channel!(socket.assigns.channel.id)
+      {:noreply, assign(socket, :channel, channel)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("add_allowed_ip", %{"ip" => raw_ip}, socket) do
@@ -260,14 +300,18 @@ defmodule JoyWeb.Channels.ShowLive do
   end
 
   def handle_event("toggle_destination", %{"id" => id}, socket) do
-    dest = Enum.find(socket.assigns.channel.destination_configs, &(to_string(&1.id) == id))
-    if dest do
-      Channels.upsert_destination_config(socket.assigns.channel.id,
-        %{"id" => dest.id, "enabled" => !dest.enabled})
+    if admin?(socket) do
+      dest = Enum.find(socket.assigns.channel.destination_configs, &(to_string(&1.id) == id))
+      if dest do
+        Channels.upsert_destination_config(socket.assigns.channel.id,
+          %{"id" => dest.id, "enabled" => !dest.enabled})
+      end
+      Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
+      channel = Channels.get_channel!(socket.assigns.channel.id)
+      {:noreply, assign(socket, :channel, channel)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
-    Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
-    channel = Channels.get_channel!(socket.assigns.channel.id)
-    {:noreply, assign(socket, :channel, channel)}
   end
 
   def handle_event("save_tls", %{"channel" => params}, socket) do
@@ -290,12 +334,7 @@ defmodule JoyWeb.Channels.ShowLive do
       case Channels.update_channel(socket.assigns.channel, params) do
         {:ok, updated} ->
           # Restart server to pick up new TLS config (stop + start pipeline tree)
-          if Joy.ChannelManager.channel_running?(updated.id) do
-            Joy.ChannelManager.stop_channel(updated.id)
-            with {:error, reason} <- Joy.ChannelManager.start_channel(updated) do
-              Logger.error("[ShowLive] Failed to restart channel #{updated.id} after TLS save: #{inspect(reason)}")
-            end
-          end
+          restart_if_running(updated, "tls_save")
           {:noreply,
            socket
            |> assign(:channel, updated)
@@ -313,31 +352,39 @@ defmodule JoyWeb.Channels.ShowLive do
   end
 
   def handle_event("save_alert", %{"channel" => params}, socket) do
-    case Channels.update_channel(socket.assigns.channel, params) do
-      {:ok, updated} ->
-        {:noreply,
-         socket
-         |> assign(:channel, updated)
-         |> assign(:alert_form, to_form(Channels.Channel.changeset(updated, %{})))
-         |> put_flash(:info, "Alert configuration saved.")}
+    if admin?(socket) do
+      case Channels.update_channel(socket.assigns.channel, params) do
+        {:ok, updated} ->
+          {:noreply,
+           socket
+           |> assign(:channel, updated)
+           |> assign(:alert_form, to_form(Channels.Channel.changeset(updated, %{})))
+           |> put_flash(:info, "Alert configuration saved.")}
 
-      {:error, cs} ->
-        {:noreply, assign(socket, :alert_form, to_form(cs))}
+        {:error, cs} ->
+          {:noreply, assign(socket, :alert_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("save_dispatch", %{"channel" => params}, socket) do
-    case Channels.update_channel(socket.assigns.channel, params) do
-      {:ok, updated} ->
-        Joy.Channel.Pipeline.reload_config(updated.id)
-        {:noreply,
-         socket
-         |> assign(:channel, updated)
-         |> assign(:dispatch_form, to_form(Channels.Channel.changeset(updated, %{})))
-         |> put_flash(:info, "Dispatch configuration saved.")}
+    if admin?(socket) do
+      case Channels.update_channel(socket.assigns.channel, params) do
+        {:ok, updated} ->
+          Joy.Channel.Pipeline.reload_config(updated.id)
+          {:noreply,
+           socket
+           |> assign(:channel, updated)
+           |> assign(:dispatch_form, to_form(Channels.Channel.changeset(updated, %{})))
+           |> put_flash(:info, "Dispatch configuration saved.")}
 
-      {:error, cs} ->
-        {:noreply, assign(socket, :dispatch_form, to_form(cs))}
+        {:error, cs} ->
+          {:noreply, assign(socket, :dispatch_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
@@ -354,12 +401,7 @@ defmodule JoyWeb.Channels.ShowLive do
       case Channels.update_channel(channel, params) do
         {:ok, updated} ->
           # Restart the channel so Horde re-places it on the new pinned node
-          if socket.assigns.running? do
-            Joy.ChannelManager.stop_channel(updated.id)
-            with {:error, reason} <- Joy.ChannelManager.start_channel(updated) do
-              Logger.error("[ShowLive] Failed to restart channel #{updated.id} after pin change: #{inspect(reason)}")
-            end
-          end
+          restart_if_running(updated, "pin_change")
           {:noreply,
            socket
            |> assign(:channel, updated)
@@ -375,6 +417,15 @@ defmodule JoyWeb.Channels.ShowLive do
   end
 
   defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
+
+  defp restart_if_running(channel, context) do
+    if Joy.ChannelManager.channel_running?(channel.id) do
+      Joy.ChannelManager.stop_channel(channel.id)
+      with {:error, reason} <- Joy.ChannelManager.start_channel(channel) do
+        Logger.error("[ShowLive] Failed to restart channel #{channel.id} (#{context}): #{inspect(reason)}")
+      end
+    end
+  end
 
   defp live_nodes do
     [node() | Node.list()]
@@ -409,12 +460,14 @@ defmodule JoyWeb.Channels.ShowLive do
               <.link navigate={~p"/channels/#{@channel.id}/messages"} class="btn btn-ghost btn-sm">
                 <.icon name="hero-queue-list" class="w-4 h-4" /> Messages
               </.link>
-              <button :if={not @running?} phx-click="start_channel" class="btn btn-success btn-sm">Start</button>
-              <button :if={@running? and not @channel.paused} phx-click="pause_channel"
-                      class="btn btn-warning btn-sm">Pause</button>
-              <button :if={@running? and @channel.paused} phx-click="resume_channel"
-                      class="btn btn-success btn-sm">Resume</button>
-              <button :if={@running?} phx-click="stop_channel" class="btn btn-ghost btn-sm">Stop</button>
+              <%= if @current_scope.user.is_admin do %>
+                <button :if={not @running?} phx-click="start_channel" class="btn btn-success btn-sm">Start</button>
+                <button :if={@running? and not @channel.paused} phx-click="pause_channel"
+                        class="btn btn-warning btn-sm">Pause</button>
+                <button :if={@running? and @channel.paused} phx-click="resume_channel"
+                        class="btn btn-success btn-sm">Resume</button>
+                <button :if={@running?} phx-click="stop_channel" class="btn btn-ghost btn-sm">Stop</button>
+              <% end %>
             </div>
           </div>
 
@@ -449,7 +502,8 @@ defmodule JoyWeb.Channels.ShowLive do
         <div class="card-body p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold">Transform Steps</h3>
-            <.link patch={~p"/channels/#{@channel.id}/transforms/new"} class="btn btn-ghost btn-sm">
+            <.link :if={@current_scope.user.is_admin}
+                   patch={~p"/channels/#{@channel.id}/transforms/new"} class="btn btn-ghost btn-sm">
               <.icon name="hero-plus" class="w-4 h-4" /> Add
             </.link>
           </div>
@@ -469,6 +523,7 @@ defmodule JoyWeb.Channels.ShowLive do
                 <p class="font-medium text-sm">{step.name}</p>
                 <p class="text-xs text-base-content/40 font-mono truncate">{String.slice(step.script, 0, 60)}...</p>
               </div>
+              <%= if @current_scope.user.is_admin do %>
               <div class="flex items-center gap-1 shrink-0">
                 <button phx-click="toggle_transform" phx-value-id={step.id}
                         class={"btn btn-xs #{if step.enabled, do: "btn-ghost", else: "btn-warning"}"}>
@@ -482,6 +537,7 @@ defmodule JoyWeb.Channels.ShowLive do
                   <.icon name="hero-trash" class="w-3.5 h-3.5" />
                 </button>
               </div>
+              <% end %>
             </div>
           </div>
         </div>
@@ -492,7 +548,8 @@ defmodule JoyWeb.Channels.ShowLive do
         <div class="card-body p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold">Destinations</h3>
-            <.link patch={~p"/channels/#{@channel.id}/destinations/new"} class="btn btn-ghost btn-sm">
+            <.link :if={@current_scope.user.is_admin}
+                   patch={~p"/channels/#{@channel.id}/destinations/new"} class="btn btn-ghost btn-sm">
               <.icon name="hero-plus" class="w-4 h-4" /> Add
             </.link>
           </div>
@@ -512,17 +569,19 @@ defmodule JoyWeb.Channels.ShowLive do
               </div>
               <div class="flex items-center gap-1 shrink-0">
                 <span class="badge badge-outline badge-xs mr-1">{@adapter_labels[dest.adapter] || dest.adapter}</span>
-                <button phx-click="toggle_destination" phx-value-id={dest.id}
-                        class={"btn btn-xs #{if dest.enabled, do: "btn-ghost", else: "btn-warning"}"}>
-                  {if dest.enabled, do: "Disable", else: "Enable"}
-                </button>
-                <.link patch={~p"/channels/#{@channel.id}/destinations/#{dest.id}/edit"}
-                       class="btn btn-ghost btn-xs">Edit</.link>
-                <button phx-click="delete_destination" phx-value-id={dest.id}
-                        data-confirm={"Delete destination '#{dest.name}'?"}
-                        class="btn btn-ghost btn-xs text-error">
-                  <.icon name="hero-trash" class="w-3.5 h-3.5" />
-                </button>
+                <%= if @current_scope.user.is_admin do %>
+                  <button phx-click="toggle_destination" phx-value-id={dest.id}
+                          class={"btn btn-xs #{if dest.enabled, do: "btn-ghost", else: "btn-warning"}"}>
+                    {if dest.enabled, do: "Disable", else: "Enable"}
+                  </button>
+                  <.link patch={~p"/channels/#{@channel.id}/destinations/#{dest.id}/edit"}
+                         class="btn btn-ghost btn-xs">Edit</.link>
+                  <button phx-click="delete_destination" phx-value-id={dest.id}
+                          data-confirm={"Delete destination '#{dest.name}'?"}
+                          class="btn btn-ghost btn-xs text-error">
+                    <.icon name="hero-trash" class="w-3.5 h-3.5" />
+                  </button>
+                <% end %>
               </div>
             </div>
           </div>
@@ -697,7 +756,8 @@ defmodule JoyWeb.Channels.ShowLive do
       </div>
       <% end %>
 
-      <%!-- Alerting --%>
+      <%!-- Alerting (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body p-5">
           <h3 class="font-semibold mb-1">Alerting</h3>
@@ -749,8 +809,10 @@ defmodule JoyWeb.Channels.ShowLive do
           </.form>
         </div>
       </div>
+      <% end %>
 
-      <%!-- Dispatch --%>
+      <%!-- Dispatch (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body p-5">
           <h3 class="font-semibold mb-1">Dispatch</h3>
@@ -786,6 +848,7 @@ defmodule JoyWeb.Channels.ShowLive do
           </.form>
         </div>
       </div>
+      <% end %>
 
       <%!-- Node Pinning (admin only) --%>
       <%= if @current_scope.user.is_admin do %>

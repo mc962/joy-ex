@@ -21,7 +21,7 @@ defmodule JoyWeb.Router do
     pipe_through [:browser, :require_authenticated_user]
 
     live_session :app,
-      on_mount: [{JoyWeb.UserAuth, :require_authenticated}, JoyWeb.AdminAuth] do
+      on_mount: [{JoyWeb.UserAuth, :require_authenticated}] do
       live "/", DashboardLive, :index
       live "/channels", Channels.IndexLive, :index
       live "/channels/new", Channels.IndexLive, :new
@@ -38,6 +38,10 @@ defmodule JoyWeb.Router do
       live "/organizations/new", Organizations.IndexLive, :new
       live "/organizations/:id", Organizations.ShowLive, :show
       live "/organizations/:id/edit", Organizations.ShowLive, :edit
+    end
+
+    live_session :admin,
+      on_mount: [{JoyWeb.UserAuth, :require_authenticated}, JoyWeb.AdminAuth] do
       live "/users", Users.IndexLive, :index
       live "/tools/mllp-client", Tools.MllpClientLive, :index
       live "/tools/sinks", Tools.SinksLive, :index
