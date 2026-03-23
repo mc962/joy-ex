@@ -27,13 +27,31 @@ defmodule Joy.Crypto do
 
   @doc "Decrypt a blob produced by encrypt/1."
   @spec decrypt(binary()) :: {:ok, binary()} | {:error, :decryption_failed}
-  def decrypt(<<iv::binary-12, tag::binary-16, ciphertext::binary>>) do
-    case :crypto.crypto_one_time_aead(:aes_256_gcm, key(), iv, ciphertext, @aad, tag, false) do
+  def decrypt(blob) do
+    case decrypt_with(blob, key()) do
+      {:ok, _} = ok -> ok
+      {:error, _} ->
+        case old_key() do
+          nil -> {:error, :decryption_failed}
+          k   -> decrypt_with(blob, k)
+        end
+    end
+  end
+
+  defp decrypt_with(<<iv::binary-12, tag::binary-16, ciphertext::binary>>, k) do
+    case :crypto.crypto_one_time_aead(:aes_256_gcm, k, iv, ciphertext, @aad, tag, false) do
       plaintext when is_binary(plaintext) -> {:ok, plaintext}
       _ -> {:error, :decryption_failed}
     end
   end
-  def decrypt(_), do: {:error, :decryption_failed}
+  defp decrypt_with(_, _), do: {:error, :decryption_failed}
 
   defp key, do: Application.fetch_env!(:joy, :encryption_key) |> Base.decode64!()
+
+  defp old_key do
+    case Application.get_env(:joy, :encryption_key_old) do
+      nil -> nil
+      k   -> Base.decode64!(k)
+    end
+  end
 end

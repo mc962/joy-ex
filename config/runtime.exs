@@ -27,6 +27,10 @@ if System.get_env("ENCRYPTION_KEY") do
   config :joy, :encryption_key, System.get_env("ENCRYPTION_KEY")
 end
 
+if System.get_env("ENCRYPTION_KEY_OLD") do
+  config :joy, :encryption_key_old, System.get_env("ENCRYPTION_KEY_OLD")
+end
+
 config :joy, JoyWeb.Endpoint, http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
