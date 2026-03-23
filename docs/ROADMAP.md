@@ -1,6 +1,6 @@
 # Joy Roadmap
 
-Items 1–8 are complete. Items 9–15 are the next wave, in rough priority order.
+All 15 items are complete.
 
 ---
 
@@ -166,16 +166,25 @@ Items 1–8 are complete. Items 9–15 are the next wave, in rough priority orde
 
 ---
 
-## 14. ENCRYPTION_KEY Rotation ⏳ Planned
+## 14. ENCRYPTION_KEY Rotation ✅ Implemented
 
 **Why:** Rotating the AES-256-GCM key currently requires a custom migration script to re-encrypt all `destination_configs.config` values and any other encrypted fields. There is no tooling for this, making rotation operationally risky.
 
-**Plan:** Add a `mix joy.rotate_key --old-key OLD --new-key NEW` task that iterates all encrypted fields, decrypts with the old key, re-encrypts with the new key, and writes back in a single transaction. Add a dual-read fallback period so a rolling deploy does not break in-flight requests.
+**What was built:**
+- `mix joy.rotate_key --old-key OLD_B64 --new-key NEW_B64 [--batch-size N]` — re-encrypts all four encrypted fields (`channels.tls_key_pem`, `destination_configs.config`, `retention_settings.aws_access_key_id`, `retention_settings.aws_secret_access_key`) in cursor-based batches, each in its own short transaction; aborts before touching anything if the old key fails a pre-flight decrypt check
+- Dual-read fallback in `Joy.Crypto.decrypt/1` — if `ENCRYPTION_KEY_OLD` env var is set, a failed decrypt with the primary key automatically retries with the old key; covers the window between deploying new code and running the rotation task
+- `ENCRYPTION_KEY_OLD` read from env in `config/runtime.exs`
 
 ---
 
-## 15. Channel Pinning ⏳ Planned
+## 15. Channel Pinning ✅ Implemented
 
 **Why:** Horde distributes channel supervisor trees across nodes using a consistent hash ring. There is no way to pin a channel to a specific node — useful for network proximity (e.g. a channel serving a device on a specific subnet), or for controlled rolling upgrades where you want to drain one node before taking it down.
 
-**Plan:** Add an optional `pinned_node` field to channels. `Joy.ChannelManager` passes a `:distribution` option to Horde that restricts placement to the named node. The channel show page exposes a node picker dropdown populated from `Node.list/0`.
+**What was built:**
+- `pinned_node` nullable string field on `channels` table
+- `Joy.PinnedDistribution` — custom `Horde.DistributionStrategy`; when the child spec carries a non-nil `pinned_node`, routes placement to the named alive cluster member; falls back to `Horde.UniformDistribution` if the node isn't in the cluster (`String.to_existing_atom` prevents garbage atom creation for disconnected nodes)
+- `Joy.Channel.Supervisor.child_spec/1` passes `pinned_node` from the channel struct into the child spec map so the distribution module can inspect it at `start_child` time
+- `Joy.ChannelSupervisor` configured with `distribution_strategy: Joy.PinnedDistribution`
+- Channel show page: node picker dropdown (admin-only) populated from `[node() | Node.list()]`; saving restarts the channel if running so Horde re-places it on the pinned node
+- IP Allowlist and TLS Configuration sections also restricted to admin users (template guard + event handler check), forward-proofing for when non-admin read access is added

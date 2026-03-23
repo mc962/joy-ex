@@ -70,7 +70,11 @@ defmodule Joy.Application do
       # Distributed dynamic supervisor for per-channel OTP trees.
       # Horde distributes channel supervisor trees across cluster nodes and
       # automatically restarts them on a healthy node if the owning node dies.
-      {Horde.DynamicSupervisor, name: Joy.ChannelSupervisor, strategy: :one_for_one, members: :auto},
+      {Horde.DynamicSupervisor,
+        name: Joy.ChannelSupervisor,
+        strategy: :one_for_one,
+        members: :auto,
+        distribution_strategy: Joy.PinnedDistribution},
 
       # Control-plane GenServer: on startup loads channels with started:true from DB
       # and starts their supervisor trees. Exposes start_channel/stop_channel API.

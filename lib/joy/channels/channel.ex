@@ -39,6 +39,12 @@ defmodule Joy.Channels.Channel do
     # The GenServer mailbox remains the backpressure point; no explicit queue is needed.
     field :dispatch_concurrency, :integer, default: 1
 
+    # Node pinning (item 15)
+    # Optional Erlang node name (string) to pin this channel's OTP tree to a specific
+    # cluster node. nil = Horde distributes via consistent hash (default).
+    # Joy.PinnedDistribution reads this field from the child spec at start_child time.
+    field :pinned_node, :string
+
     # MLLP TLS (item 1) — PEM content stored in DB, not file paths
     field :tls_enabled, :boolean, default: false
     field :tls_cert_pem, :string
@@ -67,7 +73,7 @@ defmodule Joy.Channels.Channel do
     channel
     |> cast(attrs, [
       :name, :description, :mllp_port, :started, :allowed_ips, :paused,
-      :dispatch_concurrency,
+      :dispatch_concurrency, :pinned_node,
       :tls_enabled, :tls_cert_pem, :tls_key_pem, :tls_ca_cert_pem,
       :tls_cert_expires_at, :tls_verify_peer,
       :alert_enabled, :alert_threshold, :alert_email, :alert_webhook_url,

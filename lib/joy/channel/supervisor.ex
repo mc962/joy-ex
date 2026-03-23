@@ -32,7 +32,9 @@ defmodule Joy.Channel.Supervisor do
       id: {__MODULE__, id},
       start: {__MODULE__, :start_link, [channel]},
       type: :supervisor,
-      restart: :permanent
+      restart: :permanent,
+      # Inspected by Joy.PinnedDistribution: nil = uniform hash; string = target node name.
+      pinned_node: channel.pinned_node
     }
   end
 

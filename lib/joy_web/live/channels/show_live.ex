@@ -42,7 +42,9 @@ defmodule JoyWeb.Channels.ShowLive do
      |> assign(:tls_form, nil)
      |> assign(:alert_form, nil)
      |> assign(:dispatch_form, nil)
-     |> assign(:tls_key_editing, false)}
+     |> assign(:tls_key_editing, false)
+     |> assign(:pin_form, nil)
+     |> assign(:available_nodes, [])}
   end
 
   @impl true
@@ -80,7 +82,9 @@ defmodule JoyWeb.Channels.ShowLive do
           show_transform_modal: false, show_dest_modal: false,
           tls_form: to_form(Channels.Channel.changeset(channel, %{})),
           alert_form: to_form(Channels.Channel.changeset(channel, %{})),
-          dispatch_form: to_form(Channels.Channel.changeset(channel, %{}))
+          dispatch_form: to_form(Channels.Channel.changeset(channel, %{})),
+          pin_form: to_form(Channels.Channel.changeset(channel, %{})),
+          available_nodes: live_nodes()
         )
     end
     {:noreply, socket}
@@ -228,23 +232,31 @@ defmodule JoyWeb.Channels.ShowLive do
   end
 
   def handle_event("add_allowed_ip", %{"ip" => raw_ip}, socket) do
-    ip = String.trim(raw_ip)
-    channel = socket.assigns.channel
+    if admin?(socket) do
+      ip = String.trim(raw_ip)
+      channel = socket.assigns.channel
 
-    case Channels.update_channel(channel, %{allowed_ips: channel.allowed_ips ++ [ip]}) do
-      {:ok, updated} ->
-        {:noreply, socket |> assign(:channel, updated) |> assign(:ip_error, nil)}
+      case Channels.update_channel(channel, %{allowed_ips: channel.allowed_ips ++ [ip]}) do
+        {:ok, updated} ->
+          {:noreply, socket |> assign(:channel, updated) |> assign(:ip_error, nil)}
 
-      {:error, changeset} ->
-        {msg, _} = changeset.errors[:allowed_ips]
-        {:noreply, assign(socket, :ip_error, msg)}
+        {:error, changeset} ->
+          {msg, _} = changeset.errors[:allowed_ips]
+          {:noreply, assign(socket, :ip_error, msg)}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   def handle_event("remove_allowed_ip", %{"ip" => ip}, socket) do
-    channel = socket.assigns.channel
-    {:ok, updated} = Channels.update_channel(channel, %{allowed_ips: List.delete(channel.allowed_ips, ip)})
-    {:noreply, assign(socket, :channel, updated)}
+    if admin?(socket) do
+      channel = socket.assigns.channel
+      {:ok, updated} = Channels.update_channel(channel, %{allowed_ips: List.delete(channel.allowed_ips, ip)})
+      {:noreply, assign(socket, :channel, updated)}
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
   end
 
   def handle_event("toggle_destination", %{"id" => id}, socket) do
@@ -259,40 +271,44 @@ defmodule JoyWeb.Channels.ShowLive do
   end
 
   def handle_event("save_tls", %{"channel" => params}, socket) do
-    # Don't overwrite existing key with empty string (key field hidden when not editing)
-    params = if params["tls_key_pem"] == "" or params["tls_key_pem"] == nil,
-      do: Map.delete(params, "tls_key_pem"),
-      else: params
+    if admin?(socket) do
+      # Don't overwrite existing key with empty string (key field hidden when not editing)
+      params = if params["tls_key_pem"] == "" or params["tls_key_pem"] == nil,
+        do: Map.delete(params, "tls_key_pem"),
+        else: params
 
-    # Parse cert to populate tls_cert_expires_at so CertMonitor can check expiry
-    params = case params["tls_cert_pem"] do
-      pem when is_binary(pem) and pem != "" ->
-        case Joy.CertParser.parse(pem) do
-          {:ok, %{expires_at: dt}} -> Map.put(params, "tls_cert_expires_at", dt)
-          _ -> params
-        end
-      _ -> params
-    end
-
-    case Channels.update_channel(socket.assigns.channel, params) do
-      {:ok, updated} ->
-        # Restart server to pick up new TLS config (stop + start pipeline tree)
-        if Joy.ChannelManager.channel_running?(updated.id) do
-          Joy.ChannelManager.stop_channel(updated.id)
-          with {:error, reason} <- Joy.ChannelManager.start_channel(updated) do
-            Logger.error("[ShowLive] Failed to restart channel #{updated.id} after TLS save: #{inspect(reason)}")
+      # Parse cert to populate tls_cert_expires_at so CertMonitor can check expiry
+      params = case params["tls_cert_pem"] do
+        pem when is_binary(pem) and pem != "" ->
+          case Joy.CertParser.parse(pem) do
+            {:ok, %{expires_at: dt}} -> Map.put(params, "tls_cert_expires_at", dt)
+            _ -> params
           end
-        end
-        {:noreply,
-         socket
-         |> assign(:channel, updated)
-         |> assign(:tls_key_editing, false)
-         |> assign(:tls_form, to_form(Channels.Channel.changeset(updated, %{})))
-         |> put_flash(:info, "TLS configuration saved.")}
+        _ -> params
+      end
 
-      {:error, cs} ->
-        Logger.error("[ShowLive] TLS save failed: #{inspect(cs.errors)}")
-        {:noreply, assign(socket, :tls_form, to_form(cs))}
+      case Channels.update_channel(socket.assigns.channel, params) do
+        {:ok, updated} ->
+          # Restart server to pick up new TLS config (stop + start pipeline tree)
+          if Joy.ChannelManager.channel_running?(updated.id) do
+            Joy.ChannelManager.stop_channel(updated.id)
+            with {:error, reason} <- Joy.ChannelManager.start_channel(updated) do
+              Logger.error("[ShowLive] Failed to restart channel #{updated.id} after TLS save: #{inspect(reason)}")
+            end
+          end
+          {:noreply,
+           socket
+           |> assign(:channel, updated)
+           |> assign(:tls_key_editing, false)
+           |> assign(:tls_form, to_form(Channels.Channel.changeset(updated, %{})))
+           |> put_flash(:info, "TLS configuration saved.")}
+
+        {:error, cs} ->
+          Logger.error("[ShowLive] TLS save failed: #{inspect(cs.errors)}")
+          {:noreply, assign(socket, :tls_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
@@ -327,6 +343,43 @@ defmodule JoyWeb.Channels.ShowLive do
 
   def handle_event("edit_tls_key", _, socket) do
     {:noreply, assign(socket, :tls_key_editing, true)}
+  end
+
+  def handle_event("save_pin", %{"channel" => params}, socket) do
+    if admin?(socket) do
+      channel = socket.assigns.channel
+      # Clear pin when empty string submitted (the "— No pin —" option)
+      params = if params["pinned_node"] == "", do: Map.put(params, "pinned_node", nil), else: params
+
+      case Channels.update_channel(channel, params) do
+        {:ok, updated} ->
+          # Restart the channel so Horde re-places it on the new pinned node
+          if socket.assigns.running? do
+            Joy.ChannelManager.stop_channel(updated.id)
+            with {:error, reason} <- Joy.ChannelManager.start_channel(updated) do
+              Logger.error("[ShowLive] Failed to restart channel #{updated.id} after pin change: #{inspect(reason)}")
+            end
+          end
+          {:noreply,
+           socket
+           |> assign(:channel, updated)
+           |> assign(:pin_form, to_form(Channels.Channel.changeset(updated, %{})))
+           |> put_flash(:info, "Node pinning saved.")}
+
+        {:error, cs} ->
+          {:noreply, assign(socket, :pin_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
+  end
+
+  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
+
+  defp live_nodes do
+    [node() | Node.list()]
+    |> Enum.sort()
+    |> Enum.map(&Atom.to_string/1)
   end
 
   @impl true
@@ -476,7 +529,8 @@ defmodule JoyWeb.Channels.ShowLive do
         </div>
       </div>
 
-      <%!-- IP Allowlist --%>
+      <%!-- IP Allowlist (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body p-5">
           <h3 class="font-semibold mb-1">IP Allowlist</h3>
@@ -511,8 +565,10 @@ defmodule JoyWeb.Channels.ShowLive do
           <p :if={@ip_error} class="text-error text-xs mt-1">{@ip_error}</p>
         </div>
       </div>
+      <% end %>
 
-      <%!-- TLS Configuration --%>
+      <%!-- TLS Configuration (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
       <div class="card bg-base-100 border border-base-300">
         <div class="card-body p-5">
           <h3 class="font-semibold mb-1">TLS Configuration</h3>
@@ -639,6 +695,7 @@ defmodule JoyWeb.Channels.ShowLive do
           </.form>
         </div>
       </div>
+      <% end %>
 
       <%!-- Alerting --%>
       <div class="card bg-base-100 border border-base-300">
@@ -729,6 +786,35 @@ defmodule JoyWeb.Channels.ShowLive do
           </.form>
         </div>
       </div>
+
+      <%!-- Node Pinning (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-5">
+          <h3 class="font-semibold mb-1">Node Pinning</h3>
+          <p class="text-sm text-base-content/50 mb-4">
+            Pin this channel's OTP tree to a specific cluster node — useful for network
+            proximity or controlled rolling upgrades. When unpinned, Horde distributes
+            the channel using consistent hashing. If the pinned node leaves the cluster,
+            the channel falls back to uniform distribution until the node rejoins.
+            If the channel is running, saving will restart it to apply the new placement.
+          </p>
+
+          <.form :if={@pin_form} for={@pin_form} phx-submit="save_pin" class="flex items-end gap-4">
+            <div class="form-control">
+              <label class="label"><span class="label-text">Pinned node</span></label>
+              <select class="select select-bordered select-sm w-72" name="channel[pinned_node]">
+                <option value="" selected={is_nil(@channel.pinned_node)}>— No pin (uniform distribution) —</option>
+                <option :for={n <- @available_nodes} value={n} selected={@channel.pinned_node == n}>{n}</option>
+              </select>
+            </div>
+            <div>
+              <button type="submit" class="btn btn-sm btn-primary">Save</button>
+            </div>
+          </.form>
+        </div>
+      </div>
+      <% end %>
     </div>
 
     <%!-- Transform modal (new only — edit redirects to full editor) --%>
