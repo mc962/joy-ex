@@ -31,8 +31,6 @@ defmodule JoyWeb.Organizations.ShowLive do
 
   def handle_info(_, socket), do: {:noreply, socket}
 
-  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
-
   # --- General section ---
 
   @impl true

@@ -51,6 +51,7 @@ defmodule JoyWeb do
   def live_view do
     quote do
       use Phoenix.LiveView
+      import JoyWeb.AdminAuth, only: [admin?: 1]
 
       unquote(html_helpers())
     end

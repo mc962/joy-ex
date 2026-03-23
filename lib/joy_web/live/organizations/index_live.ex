@@ -88,8 +88,6 @@ defmodule JoyWeb.Organizations.IndexLive do
 
   def handle_info(_, socket), do: {:noreply, socket}
 
-  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
-
   @impl true
   def render(assigns) do
     ~H"""

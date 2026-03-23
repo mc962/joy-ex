@@ -242,8 +242,6 @@ defmodule JoyWeb.Channels.IndexLive do
     """
   end
 
-  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
-
   defp running_ids(channels) do
     channels
     |> Enum.filter(&Joy.ChannelManager.channel_running?(&1.id))

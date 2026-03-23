@@ -12,6 +12,12 @@ defmodule JoyWeb.AdminAuth do
   import Phoenix.LiveView
   use JoyWeb, :verified_routes
 
+  @doc "Returns true when the socket's current user has is_admin set."
+  def admin?(socket) do
+    user = socket.assigns[:current_scope] && socket.assigns.current_scope.user
+    user != nil && user.is_admin
+  end
+
   def on_mount(:default, _params, _session, socket) do
     user = socket.assigns[:current_scope] && socket.assigns.current_scope.user
 

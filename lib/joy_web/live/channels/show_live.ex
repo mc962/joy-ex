@@ -416,8 +416,6 @@ defmodule JoyWeb.Channels.ShowLive do
     end
   end
 
-  defp admin?(socket), do: socket.assigns.current_scope.user.is_admin
-
   defp restart_if_running(channel, context) do
     if Joy.ChannelManager.channel_running?(channel.id) do
       Joy.ChannelManager.stop_channel(channel.id)
