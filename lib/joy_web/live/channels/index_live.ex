@@ -63,7 +63,18 @@ defmodule JoyWeb.Channels.IndexLive do
         end
 
       case result do
-        {:ok, _} ->
+        {:ok, ch} ->
+          old = socket.assigns.editing_channel
+          {action, changes} =
+            if old do
+              diff = Enum.reduce([:name, :description, :mllp_port, :organization_id], %{}, fn field, acc ->
+                if Map.get(old, field) != Map.get(ch, field), do: Map.put(acc, field, Map.get(ch, field)), else: acc
+              end)
+              {"channel.updated", diff}
+            else
+              {"channel.created", %{name: ch.name, mllp_port: ch.mllp_port}}
+            end
+          Joy.AuditLog.log(socket.assigns.current_scope.user, action, "channel", ch.id, ch.name, changes)
           channels = Channels.list_channels()
           {:noreply,
            socket
@@ -85,6 +96,7 @@ defmodule JoyWeb.Channels.IndexLive do
       channel = Channels.get_channel!(String.to_integer(id))
       if Joy.ChannelManager.channel_running?(channel.id), do: Joy.ChannelManager.stop_channel(channel.id)
       Channels.delete_channel(channel)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.deleted", "channel", channel.id, channel.name)
       channels = Channels.list_channels()
       {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
     else
@@ -97,6 +109,7 @@ defmodule JoyWeb.Channels.IndexLive do
       channel = Channels.get_channel!(String.to_integer(id))
       Joy.ChannelManager.start_channel(channel)
       Channels.set_started(channel, true)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.started", "channel", channel.id, channel.name)
       {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, channel.id))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -109,6 +122,7 @@ defmodule JoyWeb.Channels.IndexLive do
       channel = Channels.get_channel!(id)
       Joy.ChannelManager.stop_channel(id)
       Channels.set_started(channel, false)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.stopped", "channel", channel.id, channel.name)
       {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, channel.id))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}

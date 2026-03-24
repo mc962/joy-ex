@@ -1,6 +1,6 @@
 # Joy Roadmap
 
-Items 1–16 are complete. Items 17–22 are the next wave, in rough priority order.
+Items 1–17 are complete. Items 18–22 are the next wave, in rough priority order.
 
 ---
 
@@ -204,11 +204,20 @@ Items 1–16 are complete. Items 17–22 are the next wave, in rough priority or
 
 ---
 
-## 17. Audit Logging ⏳ Planned
+## 17. Audit Logging ✅ Implemented
 
 **Why:** There is no record of who changed what or when. In a HIPAA context, configuration changes to encryption keys, TLS certificates, IP allowlists, and retention settings are material events that should be traceable to a specific user and timestamp.
 
-**Plan:** Add an `audit_log_entries` table (`actor_id`, `action`, `resource_type`, `resource_id`, `changes` jsonb, `inserted_at`). Write entries on all admin-gated mutations (channel config, org config, retention settings, user promotion/demotion, key rotation). Expose a `/audit` LiveView for admins listing recent entries with filtering by actor, resource type, and date range.
+**What was built:**
+- `audit_log_entries` table: `actor_id` (nilify_all FK), `actor_email` (denormalized — survives user deletion), `action`, `resource_type`, `resource_id`, `resource_name`, `changes` (jsonb), `inserted_at`; indexes on actor_id, resource_type, inserted_at; no `updated_at` — entries are immutable
+- `Joy.AuditLog.Entry` schema and `Joy.AuditLog` context: `log/6` inserts entries; `list_entries/1` with keyword opts filtering (resource_type, actor_id, from, to, limit)
+- Call sites at every admin-gated mutation: all channel start/stop/pause/resume, TLS config, alert config, dispatch config, node pinning, IP allowlist add/remove, transform create/update/delete/toggle, destination create/update/delete/toggle; org create/update/delete, org IP/alert/TLS; user promote/demote; all dashboard start/stop/pause/resume
+- Sensitive fields never logged: TLS PEM content and destination credentials are excluded; TLS saves log only `%{tls_enabled, cert_updated, key_updated}` booleans
+- `/audit` admin-only LiveView: table with Time, Actor, Action, Resource, Changes columns; filter form (resource_type dropdown, date-from/to inputs, submits on change); color-coded action badges (created=success, deleted=error, started/resumed=success, stopped/paused=warning)
+- Login logging: `user.login` and `user.login_failed` on every authentication attempt (password + magic-link); `changes` includes method and remote IP. Used as a proxy for PHI read access — per-read logging considered but rejected as too noisy; full rationale and trade-offs in `docs/design.md`
+- `audit_retention_days` integer column on `retention_settings` (default 365); `Joy.AuditLog.purge_old/1`, `count_total/0`, `count_purgeable/1`
+- Retention settings (configurable window + manual purge button) available on the `/audit` page; audit retention is independent of message log retention
+- Channel edit `changes` field now logs the actual diff of changed fields rather than hardcoded `mllp_port`
 
 ---
 

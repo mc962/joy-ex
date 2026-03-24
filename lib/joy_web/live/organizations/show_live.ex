@@ -43,6 +43,8 @@ defmodule JoyWeb.Organizations.ShowLive do
     if admin?(socket) do
       case Organizations.update_organization(socket.assigns.org, params) do
         {:ok, org} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "organization.updated",
+            "organization", org.id, org.name)
           refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
           {:noreply,
            socket
@@ -67,6 +69,8 @@ defmodule JoyWeb.Organizations.ShowLive do
 
       case Organizations.update_organization(org, %{allowed_ips: org.allowed_ips ++ [ip]}) do
         {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "organization.ip_added",
+            "organization", org.id, org.name, %{ip: ip})
           refreshed = Organizations.get_organization!(updated.id) |> Joy.Repo.preload(:channels)
           {:noreply, assign(socket, org: refreshed, ip_error: nil)}
 
@@ -86,6 +90,8 @@ defmodule JoyWeb.Organizations.ShowLive do
 
       case Organizations.update_organization(org, %{allowed_ips: new_ips}) do
         {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "organization.ip_removed",
+            "organization", org.id, org.name, %{ip: ip})
           refreshed = Organizations.get_organization!(updated.id) |> Joy.Repo.preload(:channels)
           {:noreply, assign(socket, org: refreshed, ip_error: nil)}
 
@@ -108,6 +114,8 @@ defmodule JoyWeb.Organizations.ShowLive do
     if admin?(socket) do
       case Organizations.update_organization(socket.assigns.org, params) do
         {:ok, org} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "organization.alert_updated",
+            "organization", org.id, org.name)
           refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
           {:noreply,
            socket
@@ -134,6 +142,9 @@ defmodule JoyWeb.Organizations.ShowLive do
     if admin?(socket) do
       case Organizations.update_organization(socket.assigns.org, params) do
         {:ok, org} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "organization.tls_updated",
+            "organization", org.id, org.name,
+            %{ca_cert_updated: params["tls_ca_cert_pem"] not in [nil, ""]})
           refreshed = Organizations.get_organization!(org.id) |> Joy.Repo.preload(:channels)
           {:noreply,
            socket

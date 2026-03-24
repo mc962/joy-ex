@@ -21,11 +21,15 @@ defmodule JoyWeb.UserSessionController do
 
     case Accounts.login_user_by_magic_link(token) do
       {:ok, {user, _expired_tokens}} ->
+        Joy.AuditLog.log(user, "user.login", "user", user.id, user.email,
+          %{method: "magic_link", ip: format_ip(conn.remote_ip)})
         conn
         |> put_flash(:info, info)
         |> UserAuth.log_in_user(user, user_params)
 
       {:error, :not_found} ->
+        Joy.AuditLog.log(nil, "user.login_failed", "user", nil, nil,
+          %{method: "magic_link", ip: format_ip(conn.remote_ip)})
         conn
         |> put_flash(:error, "The link is invalid or it has expired.")
         |> render(:new, form: Phoenix.Component.to_form(%{}, as: "user"))
@@ -35,10 +39,14 @@ defmodule JoyWeb.UserSessionController do
   # email + password login
   def create(conn, %{"user" => %{"email" => email, "password" => password} = user_params}) do
     if user = Accounts.get_user_by_email_and_password(email, password) do
+      Joy.AuditLog.log(user, "user.login", "user", user.id, user.email,
+        %{method: "password", ip: format_ip(conn.remote_ip)})
       conn
       |> put_flash(:info, "Welcome back!")
       |> UserAuth.log_in_user(user, user_params)
     else
+      Joy.AuditLog.log(nil, "user.login_failed", "user", nil, email,
+        %{method: "password", ip: format_ip(conn.remote_ip)})
       form = Phoenix.Component.to_form(user_params, as: "user")
 
       # In order to prevent user enumeration attacks, don't disclose whether the email is registered.
@@ -85,4 +93,6 @@ defmodule JoyWeb.UserSessionController do
     |> put_flash(:info, "Logged out successfully.")
     |> UserAuth.log_out_user()
   end
+
+  defp format_ip(remote_ip), do: remote_ip |> :inet.ntoa() |> to_string()
 end

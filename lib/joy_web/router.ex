@@ -43,6 +43,7 @@ defmodule JoyWeb.Router do
     live_session :admin,
       on_mount: [{JoyWeb.UserAuth, :require_authenticated}, JoyWeb.AdminAuth] do
       live "/users", Users.IndexLive, :index
+      live "/audit", AuditLive, :index
       live "/tools/mllp-client", Tools.MllpClientLive, :index
       live "/tools/sinks", Tools.SinksLive, :index
       live "/tools/retention", RetentionLive, :index

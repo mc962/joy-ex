@@ -56,6 +56,8 @@ defmodule JoyWeb.Organizations.IndexLive do
 
       case result do
         {:ok, org} ->
+          action = if socket.assigns.editing_org, do: "organization.updated", else: "organization.created"
+          Joy.AuditLog.log(socket.assigns.current_scope.user, action, "organization", org.id, org.name)
           {:noreply,
            socket
            |> assign(:show_modal, false)
@@ -75,6 +77,7 @@ defmodule JoyWeb.Organizations.IndexLive do
     if admin?(socket) do
       org = Organizations.get_organization!(String.to_integer(id))
       {:ok, _} = Organizations.delete_organization(org)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "organization.deleted", "organization", org.id, org.name)
       {:noreply, assign(socket, :organizations, Organizations.list_organizations())}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}

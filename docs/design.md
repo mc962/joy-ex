@@ -27,6 +27,8 @@ This document covers specific implementation decisions in Joy: why something was
 - [Sinks: Design as a Test Tool](#sinks-design-as-a-test-tool)
 - [Organizations: Channel Grouping](#organizations-channel-grouping)
 - [Message Log Retention](#message-log-retention)
+- [Non-Admin Read Access and the Two-Tier Auth Model](#non-admin-read-access-and-the-two-tier-auth-model)
+- [Audit Logging](#audit-logging)
 - [Known Gaps](#known-gaps)
 
 ---
@@ -697,6 +699,71 @@ Within each chunk, all entries are loaded into memory to serialize them. For 50,
 ### Pending entries are unconditionally excluded
 
 The query always includes `e.status != 'pending'`, regardless of whether `all: true` was passed. This is an unconditional invariant, not a configurable option. Deleting pending entries would remove messages from the at-least-once delivery guarantee — the Pipeline would not find them on restart and they would be silently lost. There is no operational scenario where deleting pending entries is the right action; if a channel accumulates too many pending entries, the correct response is to investigate why they are not being processed.
+
+---
+
+## Non-Admin Read Access and the Two-Tier Auth Model
+
+### The split
+
+Prior to item 16, every route was gated by `JoyWeb.AdminAuth`, meaning any authenticated user needed `is_admin: true` to see anything. The router now has two Phoenix live sessions:
+
+- **`:app`** — mounts `JoyWeb.UserAuth` only (any authenticated user). Operational views: dashboard, channels, organizations, message log.
+- **`:admin`** — mounts `JoyWeb.AdminAuth` on top of user auth. Configuration-mutating or sensitive pages: `/users`, `/tools/*`, `/audit`.
+
+### Defense-in-depth
+
+Dropping a non-admin user into the `:app` session still does not give them write access. Two layers prevent mutation:
+
+1. **Template guards** — `if @current_scope.user.is_admin` conditions in each LiveView template hide forms, buttons, and config sections from non-admin users.
+2. **Event handler guards** — every `handle_event` callback that performs a mutation calls `admin?(socket)` (from `JoyWeb.AdminAuth`, imported via `use JoyWeb, :live_view`) and returns a no-op if it returns false. This blocks mutations even from crafted WebSocket messages sent by a technically-inclined user who inspects the page source.
+
+### Message retry is not admin-gated
+
+`retry` and `retry_all_failed` events are intentionally available to all authenticated users. On-call and support staff who are not admins need to be able to retry failed messages as a recovery action. Retry does not change configuration — it only re-dispatches existing message log entries.
+
+---
+
+## Audit Logging
+
+### Why immutable entries
+
+`audit_log_entries` has no `updated_at` column and the schema has no update changeset. Audit records must be tamper-evident: if an entry could be updated, a compromised admin account could erase evidence of its own actions. The application enforces append-only by having no code path that updates existing entries.
+
+### `actor_email` denormalization
+
+`actor_id` is a nullable FK with `on_delete: :nilify_all`. If the user who performed an action is later deleted, `actor_id` becomes `nil`. The `actor_email` column is a denormalized copy of the email at the time the entry was written, ensuring the audit record retains a human-readable identity even after user deletion.
+
+### What the `changes` map contains
+
+The `changes` map records only the fields that changed, using a simple before/after or field-list representation depending on the action. Fields that contain secrets are always excluded:
+
+- TLS saves log `%{tls_enabled: bool, cert_updated: bool, key_updated: bool}` — never the PEM content itself.
+- Destination creates and updates do not log the `config` map — only the adapter type and name.
+- Channel edits log the actual diff of changed fields (only keys whose values changed), not a hardcoded subset.
+
+### Login logging and the read-access proxy
+
+Joy does not log individual read operations (page views, message lookups). In a HIPAA context the full requirement is tracking who accessed PHI and when; per-read logging would satisfy that completely, but at the cost of very high volume and low signal-to-noise ratio.
+
+The chosen trade-off: log authentication events instead. Any PHI visible to an authenticated user was accessible during their session, so a login record is a bounded proxy for read access — it proves a specific identity had access from login time onward. This is sufficient for the current single-tenant model where all authenticated users can see all data.
+
+**What is logged:**
+
+| Action | Trigger | `changes` |
+|---|---|---|
+| `user.login` | Successful password or magic-link authentication | `%{method: "password"\|"magic_link", ip: "..."}` |
+| `user.login_failed` | Bad password or expired/invalid magic link | `%{method: "password"\|"magic_link", ip: "..."}` |
+
+Failed attempts are logged without a user identity (actor is nil, resource_name holds the attempted email for password attempts; nil for magic-link failures where no email is recoverable from an invalid token). The remote IP is recorded in both cases — it's the most actionable field for detecting brute force or unauthorized access.
+
+**What is not logged:** logout events. Session end is unreliable to capture (browser close, token expiry, network drop) and adds little audit value since the login timestamp already establishes the access window. If a tighter access window is needed in future, session-level tracking should be added at that point.
+
+**Limitations:** A login record proves presence, not that specific records were viewed. If read-level granularity is ever required (e.g., per-tenant data scoping with regulatory requirements), per-resource read logging should be added then. The current approach is a deliberate "good enough for now" decision.
+
+### Audit retention
+
+`retention_settings.audit_retention_days` (default 365) controls how far back entries are kept. `Joy.AuditLog.purge_old/1` deletes entries with `inserted_at < now() - audit_retention_days days`. The purge is triggered manually from the `/audit` page and is not tied to the message log retention schedule — the two retention cycles are independent.
 
 ---
 

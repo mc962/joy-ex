@@ -107,6 +107,7 @@ defmodule JoyWeb.Channels.ShowLive do
       channel = socket.assigns.channel
       Joy.ChannelManager.start_channel(channel)
       Channels.set_started(channel, true)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.started", "channel", channel.id, channel.name)
       {:noreply, assign(socket, :running?, true)}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -118,6 +119,7 @@ defmodule JoyWeb.Channels.ShowLive do
       channel = socket.assigns.channel
       Joy.ChannelManager.stop_channel(channel.id)
       Channels.set_started(channel, false)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.stopped", "channel", channel.id, channel.name)
       {:noreply, assign(socket, :running?, false)}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -126,8 +128,10 @@ defmodule JoyWeb.Channels.ShowLive do
 
   def handle_event("pause_channel", _, socket) do
     if admin?(socket) do
-      Joy.ChannelManager.pause_channel(socket.assigns.channel.id)
-      channel = Channels.get_channel!(socket.assigns.channel.id)
+      channel = socket.assigns.channel
+      Joy.ChannelManager.pause_channel(channel.id)
+      channel = Channels.get_channel!(channel.id)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.paused", "channel", channel.id, channel.name)
       {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, true))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -136,8 +140,10 @@ defmodule JoyWeb.Channels.ShowLive do
 
   def handle_event("resume_channel", _, socket) do
     if admin?(socket) do
-      Joy.ChannelManager.resume_channel(socket.assigns.channel.id)
-      channel = Channels.get_channel!(socket.assigns.channel.id)
+      channel = socket.assigns.channel
+      Joy.ChannelManager.resume_channel(channel.id)
+      channel = Channels.get_channel!(channel.id)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.resumed", "channel", channel.id, channel.name)
       {:noreply, socket |> assign(:channel, channel) |> assign(:stats, Map.put(socket.assigns.stats, :paused, false))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -158,9 +164,13 @@ defmodule JoyWeb.Channels.ShowLive do
 
   def handle_event("save_transform", %{"transform_step" => params}, socket) do
     if admin?(socket) do
+      editing = socket.assigns.editing_transform
       result = Channels.upsert_transform_step(socket.assigns.channel.id, params)
       case result do
-        {:ok, _} ->
+        {:ok, step} ->
+          action = if editing, do: "transform.updated", else: "transform.created"
+          Joy.AuditLog.log(socket.assigns.current_scope.user, action, "transform", step.id, step.name,
+            %{channel_id: socket.assigns.channel.id})
           Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
           channel = Channels.get_channel!(socket.assigns.channel.id)
           {:noreply,
@@ -179,7 +189,11 @@ defmodule JoyWeb.Channels.ShowLive do
   def handle_event("delete_transform", %{"id" => id}, socket) do
     if admin?(socket) do
       step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
-      if step, do: Channels.delete_transform_step(step)
+      if step do
+        Channels.delete_transform_step(step)
+        Joy.AuditLog.log(socket.assigns.current_scope.user, "transform.deleted", "transform", step.id, step.name,
+          %{channel_id: socket.assigns.channel.id})
+      end
       channel = Channels.get_channel!(socket.assigns.channel.id)
       remaining_ids = Enum.map(channel.transform_steps, & &1.id)
       if remaining_ids != [], do: Channels.reorder_transform_steps(socket.assigns.channel.id, remaining_ids)
@@ -196,6 +210,8 @@ defmodule JoyWeb.Channels.ShowLive do
       step = Enum.find(socket.assigns.channel.transform_steps, &(to_string(&1.id) == id))
       if step do
         Channels.upsert_transform_step(socket.assigns.channel.id, %{"id" => step.id, "enabled" => !step.enabled})
+        Joy.AuditLog.log(socket.assigns.current_scope.user, "transform.toggled", "transform", step.id, step.name,
+          %{enabled: !step.enabled})
       end
       Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
       channel = Channels.get_channel!(socket.assigns.channel.id)
@@ -241,9 +257,13 @@ defmodule JoyWeb.Channels.ShowLive do
 
   def handle_event("save_destination", %{"destination_config" => params}, socket) do
     if admin?(socket) do
+      editing = socket.assigns.editing_dest
       result = Channels.upsert_destination_config(socket.assigns.channel.id, params)
       case result do
-        {:ok, _} ->
+        {:ok, dest} ->
+          action = if editing, do: "destination.updated", else: "destination.created"
+          Joy.AuditLog.log(socket.assigns.current_scope.user, action, "destination", dest.id, dest.name,
+            %{adapter: dest.adapter, channel_id: socket.assigns.channel.id})
           Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
           channel = Channels.get_channel!(socket.assigns.channel.id)
           {:noreply,
@@ -262,7 +282,11 @@ defmodule JoyWeb.Channels.ShowLive do
   def handle_event("delete_destination", %{"id" => id}, socket) do
     if admin?(socket) do
       dest = Enum.find(socket.assigns.channel.destination_configs, &(to_string(&1.id) == id))
-      if dest, do: Channels.delete_destination_config(dest)
+      if dest do
+        Channels.delete_destination_config(dest)
+        Joy.AuditLog.log(socket.assigns.current_scope.user, "destination.deleted", "destination", dest.id, dest.name,
+          %{channel_id: socket.assigns.channel.id})
+      end
       Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
       channel = Channels.get_channel!(socket.assigns.channel.id)
       {:noreply, assign(socket, :channel, channel)}
@@ -278,6 +302,8 @@ defmodule JoyWeb.Channels.ShowLive do
 
       case Channels.update_channel(channel, %{allowed_ips: channel.allowed_ips ++ [ip]}) do
         {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.ip_added",
+            "channel", channel.id, channel.name, %{ip: ip})
           {:noreply, socket |> assign(:channel, updated) |> assign(:ip_error, nil)}
 
         {:error, changeset} ->
@@ -293,6 +319,8 @@ defmodule JoyWeb.Channels.ShowLive do
     if admin?(socket) do
       channel = socket.assigns.channel
       {:ok, updated} = Channels.update_channel(channel, %{allowed_ips: List.delete(channel.allowed_ips, ip)})
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.ip_removed",
+        "channel", channel.id, channel.name, %{ip: ip})
       {:noreply, assign(socket, :channel, updated)}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -305,6 +333,8 @@ defmodule JoyWeb.Channels.ShowLive do
       if dest do
         Channels.upsert_destination_config(socket.assigns.channel.id,
           %{"id" => dest.id, "enabled" => !dest.enabled})
+        Joy.AuditLog.log(socket.assigns.current_scope.user, "destination.toggled", "destination", dest.id, dest.name,
+          %{enabled: !dest.enabled, channel_id: socket.assigns.channel.id})
       end
       Joy.Channel.Pipeline.reload_config(socket.assigns.channel.id)
       channel = Channels.get_channel!(socket.assigns.channel.id)
@@ -333,6 +363,11 @@ defmodule JoyWeb.Channels.ShowLive do
 
       case Channels.update_channel(socket.assigns.channel, params) do
         {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.tls_updated",
+            "channel", updated.id, updated.name,
+            %{tls_enabled: updated.tls_enabled,
+              cert_updated: params["tls_cert_pem"] not in [nil, ""],
+              key_updated: Map.has_key?(params, "tls_key_pem")})
           # Restart server to pick up new TLS config (stop + start pipeline tree)
           restart_if_running(updated, "tls_save")
           {:noreply,
@@ -355,6 +390,9 @@ defmodule JoyWeb.Channels.ShowLive do
     if admin?(socket) do
       case Channels.update_channel(socket.assigns.channel, params) do
         {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.alert_updated",
+            "channel", updated.id, updated.name,
+            %{alert_enabled: updated.alert_enabled, threshold: updated.alert_threshold})
           {:noreply,
            socket
            |> assign(:channel, updated)
@@ -373,6 +411,9 @@ defmodule JoyWeb.Channels.ShowLive do
     if admin?(socket) do
       case Channels.update_channel(socket.assigns.channel, params) do
         {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.dispatch_updated",
+            "channel", updated.id, updated.name,
+            %{concurrency: updated.dispatch_concurrency})
           Joy.Channel.Pipeline.reload_config(updated.id)
           {:noreply,
            socket
@@ -400,6 +441,9 @@ defmodule JoyWeb.Channels.ShowLive do
 
       case Channels.update_channel(channel, params) do
         {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.pin_updated",
+            "channel", updated.id, updated.name,
+            %{pinned_node: updated.pinned_node})
           # Restart the channel so Horde re-places it on the new pinned node
           restart_if_running(updated, "pin_change")
           {:noreply,

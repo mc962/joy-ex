@@ -16,6 +16,7 @@ Joy is an HL7 v2.x integration engine: it receives HL7 messages over MLLP (TCP),
 - [Dispatch Concurrency](#dispatch-concurrency)
 - [Organizations](#organizations)
 - [Message Log Retention](#message-log-retention)
+- [Audit Logging](#audit-logging)
 - [Data Model](#data-model)
 
 ---
@@ -307,26 +308,36 @@ Joy runs as a multi-node Erlang cluster. Key properties:
 
 ## Web Interface
 
-All web routes require authentication and admin status. Users can self-register, but freshly registered users cannot access anything until promoted to admin via `mix joy.make_admin`. This is intentional: Joy manages healthcare infrastructure and should not be accessible to arbitrary authenticated users.
+All web routes require authentication. Users can self-register, but freshly registered users cannot access anything meaningful until promoted to admin via `mix joy.make_admin`. Non-admin authenticated users get read-only access to operational views; admin users can make configuration changes.
 
 Authentication uses `phx.gen.auth` (email + password + magic link via email token). Session tokens are stored in the database (`user_tokens` table), so sessions work correctly across a cluster without sticky sessions or shared cookie signing concerns.
 
+### Two-tier live session model
+
+The router splits routes into two Phoenix live sessions:
+
+- **`:app`** — any authenticated user. Covers the dashboard, channel views, org views, and message log pages. Non-admin users see status, stats, and message data but all mutation controls are hidden by template guards and blocked by event handler guards (`admin?(socket)` imported from `JoyWeb.AdminAuth`).
+- **`:admin`** — requires `is_admin: true`, enforced by the `JoyWeb.AdminAuth` on-mount hook. Covers `/users`, `/tools/*`, and `/audit`.
+
+`admin?/1` is a public function in `JoyWeb.AdminAuth` imported into all LiveViews via `use JoyWeb, :live_view`. Message retry (`retry`, `retry_all_failed`) is intentionally not admin-gated — on-call and support staff can retry failed messages as a recovery action.
+
 ### Routes
 
-| Path | Purpose |
-|---|---|
-| `/` | Dashboard — channels grouped by org, throughput stats, cert expiry warnings |
-| `/channels` | Channel list; create/edit channels (includes org assignment) |
-| `/channels/:id` | Channel detail — transforms, destinations, TLS config, alerting, pause/resume |
-| `/channels/:id/transforms/:id/editor` | Full-screen transform script editor with live preview |
-| `/channels/:id/messages` | Message log — search by message type / patient ID, retry failed |
-| `/messages/failed` | Global dead letter queue — all failed messages across all channels |
-| `/organizations` | Organization list; create new organizations |
-| `/organizations/:id` | Organization detail — member channels, IP allowlist, alert config, TLS CA cert |
-| `/users` | User list — admin management |
-| `/tools/mllp-client` | Interactive MLLP client (plain TCP and TLS) for testing channels |
-| `/tools/sinks` | View in-memory sink contents for testing destinations |
-| `/tools/retention` | Message log retention settings and manual purge controls |
+| Path | Live session | Purpose |
+|---|---|---|
+| `/` | `:app` | Dashboard — channels grouped by org, throughput stats, cert expiry warnings |
+| `/channels` | `:app` | Channel list; create/edit channels (includes org assignment) |
+| `/channels/:id` | `:app` | Channel detail — transforms, destinations, TLS config, alerting, pause/resume |
+| `/channels/:id/transforms/:id/editor` | `:app` | Full-screen transform script editor with live preview |
+| `/channels/:id/messages` | `:app` | Message log — search by message type / patient ID, retry failed |
+| `/messages/failed` | `:app` | Global dead letter queue — all failed messages across all channels |
+| `/organizations` | `:app` | Organization list; create new organizations |
+| `/organizations/:id` | `:app` | Organization detail — member channels, IP allowlist, alert config, TLS CA cert |
+| `/users` | `:admin` | User list — admin management |
+| `/tools/mllp-client` | `:admin` | Interactive MLLP client (plain TCP and TLS) for testing channels |
+| `/tools/sinks` | `:admin` | View in-memory sink contents for testing destinations |
+| `/tools/retention` | `:admin` | Message log retention settings and manual purge controls |
+| `/audit` | `:admin` | Audit log — filterable history of admin mutations |
 
 ### Real-time updates
 
@@ -387,9 +398,45 @@ All three receive the same gzip-compressed NDJSON payload. The archive format is
 
 ---
 
+## Audit Logging
+
+`Joy.AuditLog` is a context that records every admin-gated mutation as an immutable log entry. It provides traceability for HIPAA-relevant configuration changes — who changed what and when.
+
+### Context API
+
+- `Joy.AuditLog.log/6` — inserts one entry. Arguments: `actor_id`, `actor_email`, `action` (atom, e.g. `:created`, `:deleted`, `:started`), `resource_type` (string, e.g. `"channel"`), `resource_id`, `resource_name`, and a `changes` map.
+- `Joy.AuditLog.list_entries/1` — queries entries with keyword opts: `resource_type:`, `actor_id:`, `from:`, `to:`, `limit:`.
+- `Joy.AuditLog.purge_old/1` — deletes entries older than the given number of days. Called from the `/audit` page's manual purge button and (when configured) on a schedule.
+- `Joy.AuditLog.count_total/0` and `count_purgeable/1` — counts for UI display.
+
+### What is logged
+
+Call sites exist at every admin-gated mutation: channel start/stop/pause/resume, TLS config, alert config, dispatch config, node pinning, IP allowlist add/remove, transform create/update/delete/toggle, destination create/update/delete/toggle, org create/update/delete, user promote/demote, and all dashboard lifecycle actions. The `changes` map contains only the fields that changed; for TLS saves it contains only boolean flags (`tls_enabled`, `cert_updated`, `key_updated`) — PEM content and destination credentials are never logged.
+
+### `audit_log_entries` schema
+
+```
+actor_id      — nullable FK → users (nilify_all; email is denormalized so records survive user deletion)
+actor_email   — denormalized email string
+action        — string (e.g. "created", "deleted", "started", "stopped")
+resource_type — string (e.g. "channel", "organization", "user")
+resource_id   — integer (the resource's DB id)
+resource_name — string (snapshot of the name at the time of the action)
+changes       — jsonb (only changed fields; no secrets)
+inserted_at   — immutable timestamp; no updated_at
+```
+
+Indexes on `actor_id`, `resource_type`, and `inserted_at` support the filter queries on the `/audit` LiveView.
+
+### Retention
+
+`retention_settings` carries an `audit_retention_days` integer column (default 365). The `/audit` admin page exposes a settings form for this window and a manual purge button that calls `Joy.AuditLog.purge_old/1`. Audit retention is managed separately from message log retention.
+
+---
+
 ## Data Model
 
-Seven tables, all in the `joy` Postgres database:
+Nine tables, all in the `joy` Postgres database:
 
 ```
 organizations
@@ -444,7 +491,20 @@ retention_settings  (single row — created on first access)
   aws_bucket, aws_prefix, aws_region
   aws_access_key_id (encrypted), aws_secret_access_key (encrypted)
   last_purge_at, last_purge_deleted, last_purge_archived
+  audit_retention_days (int, default 365)  — audit log purge window; managed from /audit page
   inserted_at, updated_at
+
+audit_log_entries  (append-only; no updated_at)
+  id
+  actor_id (FK → users, nilify_all)   — nil if user was deleted
+  actor_email (text)                  — denormalized; survives user deletion
+  action (string)                     — e.g. "created", "deleted", "started", "stopped"
+  resource_type (string)              — e.g. "channel", "organization", "user"
+  resource_id (integer)
+  resource_name (string)              — snapshot at time of action
+  changes (jsonb)                     — changed fields only; no secrets
+  inserted_at
+  INDEX actor_id, INDEX resource_type, INDEX inserted_at
 ```
 
 `destination_configs.config` is an encrypted binary (map serialized as JSON then AES-256-GCM encrypted). The Ecto type (`Joy.Encrypted.MapType`) transparently encrypts on insert and decrypts on load using the `ENCRYPTION_KEY`. Adapters see a plaintext map.

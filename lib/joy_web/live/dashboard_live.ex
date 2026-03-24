@@ -66,6 +66,7 @@ defmodule JoyWeb.DashboardLive do
       channel = Joy.Channels.get_channel!(id)
       Joy.ChannelManager.start_channel(channel)
       Joy.Channels.set_started(channel, true)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.started", "channel", id, channel.name)
       {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, id))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -78,6 +79,7 @@ defmodule JoyWeb.DashboardLive do
       channel = Joy.Channels.get_channel!(id)
       Joy.ChannelManager.stop_channel(id)
       Joy.Channels.set_started(channel, false)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.stopped", "channel", id, channel.name)
       {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, id))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -87,7 +89,9 @@ defmodule JoyWeb.DashboardLive do
   def handle_event("pause_channel", %{"id" => id}, socket) do
     if admin?(socket) do
       id = String.to_integer(id)
+      channel = Joy.Channels.get_channel!(id)
       Joy.ChannelManager.pause_channel(id)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.paused", "channel", id, channel.name)
       {:noreply, assign(socket, :paused_ids, MapSet.put(socket.assigns.paused_ids, id))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -97,7 +101,9 @@ defmodule JoyWeb.DashboardLive do
   def handle_event("resume_channel", %{"id" => id}, socket) do
     if admin?(socket) do
       id = String.to_integer(id)
+      channel = Joy.Channels.get_channel!(id)
       Joy.ChannelManager.resume_channel(id)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.resumed", "channel", id, channel.name)
       {:noreply, assign(socket, :paused_ids, MapSet.delete(socket.assigns.paused_ids, id))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}

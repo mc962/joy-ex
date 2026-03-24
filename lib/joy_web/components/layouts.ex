@@ -44,6 +44,7 @@ defmodule JoyWeb.Layouts do
             Admin
           </p>
           <.nav_link icon="hero-users" label="Users" href={~p"/users"} />
+          <.nav_link icon="hero-clipboard-document-list" label="Audit Log" href={~p"/audit"} />
           <.nav_link icon="hero-chart-bar" label="Live Metrics" href="/dev/dashboard" external />
 
           <p class="px-2 mt-6 mb-2 text-xs font-semibold uppercase tracking-widest text-base-content/40">

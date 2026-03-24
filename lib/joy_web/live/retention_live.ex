@@ -13,7 +13,7 @@ defmodule JoyWeb.RetentionLive do
      socket
      |> assign(:page_title, "Log Retention")
      |> assign(:settings, settings)
-     |> assign(:form, to_form(Retention.change_settings(settings)))
+     |> assign(:form, to_form(Retention.change_settings(settings), as: :retention_settings))
      |> assign(:form_destination, settings.archive_destination)
      |> assign(:stats, stats)
      |> assign(:purge_running, false)
@@ -29,7 +29,7 @@ defmodule JoyWeb.RetentionLive do
   def handle_event("validate", %{"retention_settings" => params}, socket) do
     cs = Settings.changeset(socket.assigns.settings, params) |> Map.put(:action, :validate)
     {:noreply, assign(socket,
-      form: to_form(cs),
+      form: to_form(cs, as: :retention_settings),
       form_destination: params["archive_destination"] || socket.assigns.form_destination)}
   end
 
@@ -39,12 +39,12 @@ defmodule JoyWeb.RetentionLive do
         {:noreply,
          socket
          |> assign(:settings, settings)
-         |> assign(:form, to_form(Retention.change_settings(settings)))
+         |> assign(:form, to_form(Retention.change_settings(settings), as: :retention_settings))
          |> assign(:form_destination, settings.archive_destination)
          |> put_flash(:info, "Retention settings saved")}
 
       {:error, cs} ->
-        {:noreply, assign(socket, :form, to_form(cs))}
+        {:noreply, assign(socket, :form, to_form(cs, as: :retention_settings))}
     end
   end
 

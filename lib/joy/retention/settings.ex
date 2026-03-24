@@ -24,6 +24,7 @@ defmodule Joy.Retention.Settings do
 
   schema "retention_settings" do
     field :retention_days, :integer, default: 90
+    field :audit_retention_days, :integer, default: 365
     field :schedule_enabled, :boolean, default: false
     field :schedule_hour, :integer, default: 2
 
@@ -47,13 +48,14 @@ defmodule Joy.Retention.Settings do
   def changeset(settings, attrs) do
     settings
     |> cast(attrs, [
-      :retention_days, :schedule_enabled, :schedule_hour,
+      :retention_days, :audit_retention_days, :schedule_enabled, :schedule_hour,
       :archive_destination, :local_path,
       :aws_bucket, :aws_prefix, :aws_region,
       :aws_access_key_id, :aws_secret_access_key
     ])
     |> validate_required([:retention_days, :schedule_enabled, :schedule_hour, :archive_destination])
     |> validate_number(:retention_days, greater_than: 0)
+    |> validate_number(:audit_retention_days, greater_than: 0)
     |> validate_number(:schedule_hour, greater_than_or_equal_to: 0, less_than: 24)
     |> validate_inclusion(:archive_destination, @destinations)
     |> validate_archive_config()

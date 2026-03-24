@@ -328,7 +328,7 @@ Joy monitors TLS cert expiry automatically. A warning banner appears on the dash
 
 **Connection pool sizing:** Each node opens `POOL_SIZE` connections to the database. With 3 nodes at the default pool size of 10, you use 30 connections. PostgreSQL's default `max_connections` is 100. Adjust `POOL_SIZE` per node accordingly, or use PgBouncer if you need to run many nodes.
 
-**Migrations:** The migration binary (`bin/migrate`) runs all pending migrations and exits. It is safe to run multiple times — already-applied migrations are skipped. Never run migrations in parallel from multiple nodes simultaneously.
+**Migrations:** The migration binary (`bin/migrate`) runs all pending migrations and exits. It is safe to run multiple times — already-applied migrations are skipped. Never run migrations in parallel from multiple nodes simultaneously. Migrations that must be present before the application starts include the `audit_log_entries` table and the `audit_retention_days` column on `retention_settings` (added in item 17).
 
 **Backups:** The `message_log` table stores raw HL7 messages and contains PHI. Your backup strategy must cover this table with the same care as any PHI-containing system. Take regular snapshots of the Postgres database. If using RDS, enable automated backups and point-in-time recovery. Test restores regularly.
 
@@ -358,7 +358,8 @@ This key encrypts destination credentials (API keys, MLLP passwords, webhook sec
 
 ### Web UI
 
-- All routes require authentication. Users must be explicitly promoted to admin (`mix joy.make_admin`) before accessing anything. Self-registered users cannot see the application.
+- All routes require authentication. Non-admin authenticated users get read-only access to operational views (dashboard, channels, message log). Admin users can make configuration changes. Self-registered users cannot see anything until promoted to admin (`mix joy.make_admin`).
+- Admin-only routes (`/users`, `/tools/*`, `/audit`) are enforced at the live session level by `JoyWeb.AdminAuth`. Mutation event handlers in the `:app` live session also check `admin?(socket)` as a defense-in-depth guard.
 - Use HTTPS. Configure a reverse proxy (nginx, ALB) to terminate TLS and proxy to Joy's port 4000. See the commented `https:` block in `config/runtime.exs` for terminating TLS directly in Joy if preferred.
 - Set `PHX_HOST` to your actual hostname to prevent host header injection.
 

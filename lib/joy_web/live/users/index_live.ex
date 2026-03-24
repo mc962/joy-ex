@@ -16,6 +16,7 @@ defmodule JoyWeb.Users.IndexLive do
   def handle_event("promote", %{"id" => id}, socket) do
     user = Accounts.get_user!(String.to_integer(id))
     {:ok, _} = Accounts.set_admin(user, true)
+    Joy.AuditLog.log(socket.assigns.current_scope.user, "user.promoted", "user", user.id, user.email)
     {:noreply, assign(socket, :users, Accounts.list_users())}
   end
 
@@ -26,6 +27,7 @@ defmodule JoyWeb.Users.IndexLive do
       {:noreply, put_flash(socket, :error, "You cannot remove your own admin privileges.")}
     else
       {:ok, _} = Accounts.set_admin(user, false)
+      Joy.AuditLog.log(socket.assigns.current_scope.user, "user.demoted", "user", user.id, user.email)
       {:noreply, assign(socket, :users, Accounts.list_users())}
     end
   end
