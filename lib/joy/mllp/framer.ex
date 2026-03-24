@@ -58,9 +58,15 @@ defmodule Joy.MLLP.Framer do
   def unwrap(<<>>), do: :incomplete
   def unwrap(_), do: {:error, :invalid_frame}
 
-  @doc "Build a complete MLLP-framed ACK response for an incoming HL7 message."
-  @spec build_ack(Joy.HL7.Message.t(), :aa | :ae | :ar) :: binary()
-  def build_ack(original_msg, code) do
+  @doc """
+  Build a complete MLLP-framed ACK response for an incoming HL7 message.
+
+  Opts:
+    - `:sending_app` — override MSH.3 (default: mirror inbound MSH.5)
+    - `:sending_fac` — override MSH.4 (default: mirror inbound MSH.6)
+  """
+  @spec build_ack(Joy.HL7.Message.t(), :aa | :ae | :ar, keyword()) :: binary()
+  def build_ack(original_msg, code, opts \\ []) do
     original_msh = Joy.HL7.find_segment(original_msg, "MSH") || %{fields: []}
     fs = original_msg.field_sep
     cs = original_msg.comp_sep
@@ -68,9 +74,9 @@ defmodule Joy.MLLP.Framer do
     ec = original_msg.esc_char
     ss = original_msg.sub_sep
 
-    # Swap sender/receiver: MSH.3/4 ↔ MSH.5/6
-    sending_app  = field(original_msh, 5)
-    sending_fac  = field(original_msh, 6)
+    # Swap sender/receiver: MSH.3/4 ↔ MSH.5/6, with optional per-channel overrides
+    sending_app  = opts[:sending_app] || field(original_msh, 5)
+    sending_fac  = opts[:sending_fac] || field(original_msh, 6)
     receiving_app = field(original_msh, 3)
     receiving_fac = field(original_msh, 4)
     orig_control_id = field(original_msh, 10)

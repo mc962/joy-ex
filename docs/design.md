@@ -29,6 +29,7 @@ This document covers specific implementation decisions in Joy: why something was
 - [Message Log Retention](#message-log-retention)
 - [Non-Admin Read Access and the Two-Tier Auth Model](#non-admin-read-access-and-the-two-tier-auth-model)
 - [Audit Logging](#audit-logging)
+- [ACK Customization](#ack-customization)
 - [Known Gaps](#known-gaps)
 
 ---
@@ -64,7 +65,7 @@ On `:invalid_frame`, the entire buffer is discarded and a warning is logged. Thi
 
 ### ACK field separator preservation
 
-`Framer.build_ack/2` reads the field separator and encoding characters (`comp_sep`, `rep_sep`, etc.) from the incoming message's MSH header and uses the same characters in the ACK response. This matters: some legacy systems validate that the ACK uses the exact same separators they sent, and will reject a response with different ones. Building the ACK from the original MSH also correctly swaps sender and receiver fields (MSH.3/4 ↔ MSH.5/6), which is required by the HL7 standard.
+`Framer.build_ack/3` reads the field separator and encoding characters (`comp_sep`, `rep_sep`, etc.) from the incoming message's MSH header and uses the same characters in the ACK response. This matters: some legacy systems validate that the ACK uses the exact same separators they sent, and will reject a response with different ones. Building the ACK from the original MSH also correctly swaps sender and receiver fields (MSH.3/4 ↔ MSH.5/6), which is required by the HL7 standard.
 
 ---
 
@@ -767,16 +768,32 @@ Failed attempts are logged without a user identity (actor is nil, resource_name 
 
 ---
 
+## ACK Customization
+
+### Why override only the success path
+
+`ack_code_override` replaces the `:aa` (Application Accept) code that is sent on successful message persist. Error codes — `:ae` on parse failure or DB error — are never replaced. This is intentional: error ACKs are signals about Joy's own health, not about the content of the message. Suppressing them by overriding to AA would hide real failures from the sending system.
+
+The most common real-world need is for a receiving interface engine that expects AR ("Application Reject") from a passthrough system, or AE as a convention for "received but not validated". These are success-path overrides.
+
+### Why config takes effect for new connections only
+
+`Joy.MLLP.Connection` loads the channel from the database once in `handle_connection/2` and holds it in state for the lifetime of the TCP connection. ACK config is read from `state.channel` at each `send_ack` call, so it reflects whatever was loaded at connection time.
+
+Reloading the channel on every message would add a DB round-trip to the hot path of every message. For ACK config — which changes rarely — this is not worth it. MLLP senders typically hold persistent connections, but they also reconnect on error or restart; a config change takes effect at the next reconnect. The channel show page notes this limitation explicitly.
+
+### MSH.3/4 override vs mirroring
+
+By default, the ACK's MSH.3 (sending application) is taken from the inbound message's MSH.5 (receiving application), and the ACK's MSH.4 (sending facility) from the inbound MSH.6 — the "mirror" convention required by HL7 2.x. Some interface engines ignore these fields; others route responses based on them. When `ack_sending_app` or `ack_sending_fac` is configured, `Framer.build_ack/3` uses the configured value instead of the mirrored one. A nil or empty override falls through to mirroring, so channels with no configuration are unaffected.
+
+---
+
 ## Known Gaps
 
 These are documented limitations in the current design that are worth knowing about.
 
-**No channel pinning:** Horde distributes channels across nodes using a consistent hash ring. There is no mechanism to pin a channel to a specific node. This matters if you want to colocate specific channels for network proximity reasons, or if you want to control which node runs a channel during a rolling upgrade (see Roadmap item 15).
-
 **Transform `set` does not enforce segment ordering:** Writing to a nonexistent segment appends it to the end of the segment list regardless of HL7 segment ordering rules. Most downstream systems are lenient about this, but strict validators may reject messages with segments in unexpected positions (see Roadmap item 12).
 
 **`Joy.Sinks` is node-local:** Messages arrive at the sink on whichever node is running the channel. The Sinks UI shows the local node's sink state only. In a cluster, this means the UI may show empty sinks even when messages are flowing on another node (see Roadmap item 13).
-
-**No key rotation for `ENCRYPTION_KEY`:** Rotating the key requires re-encrypting all `destination_configs.config` values, `channels.tls_key_pem`, and `retention_settings` AWS credentials. There is no tooling for this. A rotation would need to be done as a custom migration script (see Roadmap item 14).
 
 **Retention scheduler is not a distributed singleton:** `Joy.Retention.Scheduler` runs on every node. The `last_purge_at` guard prevents most duplicate runs, but there is a small race window where two nodes both check within the same minute and both trigger a purge. The result is two archive files for the same set of entries followed by one delete pass — safe, but wasteful. A future improvement would use a distributed lock or elect a single scheduler node.

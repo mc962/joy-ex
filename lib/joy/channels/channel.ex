@@ -60,6 +60,11 @@ defmodule Joy.Channels.Channel do
     field :alert_webhook_url, :string
     field :alert_cooldown_minutes, :integer, default: 60
 
+    # ACK customization (item 18)
+    field :ack_code_override, :string     # nil | "AA" | "AE" | "AR"
+    field :ack_sending_app, :string       # nil = mirror inbound MSH.5
+    field :ack_sending_fac, :string       # nil = mirror inbound MSH.6
+
     belongs_to :organization, Joy.Organizations.Organization
 
     has_many :transform_steps, Joy.Channels.TransformStep, preload_order: [asc: :position]
@@ -77,7 +82,8 @@ defmodule Joy.Channels.Channel do
       :tls_enabled, :tls_cert_pem, :tls_key_pem, :tls_ca_cert_pem,
       :tls_cert_expires_at, :tls_verify_peer,
       :alert_enabled, :alert_threshold, :alert_email, :alert_webhook_url,
-      :alert_cooldown_minutes, :organization_id
+      :alert_cooldown_minutes, :organization_id,
+      :ack_code_override, :ack_sending_app, :ack_sending_fac
     ])
     |> validate_required([:name, :mllp_port])
     |> validate_length(:name, min: 2, max: 100)
@@ -88,6 +94,15 @@ defmodule Joy.Channels.Channel do
     |> validate_tls()
     |> validate_number(:alert_threshold, greater_than: 0)
     |> validate_number(:alert_cooldown_minutes, greater_than: 0)
+    |> validate_ack_code()
+  end
+
+  defp validate_ack_code(changeset) do
+    case get_field(changeset, :ack_code_override) do
+      nil -> changeset
+      _   -> validate_inclusion(changeset, :ack_code_override, ["AA", "AE", "AR"],
+               message: "must be AA, AE, or AR")
+    end
   end
 
   defp validate_tls(changeset) do

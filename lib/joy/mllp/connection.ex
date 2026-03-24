@@ -84,15 +84,15 @@ defmodule Joy.MLLP.Connection do
         case Joy.MessageLog.persist_pending(state.channel_id, message_control_id, raw_hl7) do
           {:ok, %{id: nil}} ->
             # Duplicate — already persisted (same message_control_id). Just ACK.
-            send_ack(socket, msg, :aa)
+            send_ack(socket, msg, :aa, state.channel)
 
           {:ok, entry} ->
-            send_ack(socket, msg, :aa)
+            send_ack(socket, msg, :aa, state.channel)
             dispatch_to_pipeline(state.channel_id, entry.id)
 
           {:error, reason} ->
             Logger.error("[MLLP.Connection] Failed to persist message: #{inspect(reason)}")
-            send_ack(socket, msg, :ae)
+            send_ack(socket, msg, :ae, state.channel)
         end
 
       {:error, reason} ->
@@ -101,9 +101,22 @@ defmodule Joy.MLLP.Connection do
     end
   end
 
-  defp send_ack(socket, msg, code) do
-    ThousandIsland.Socket.send(socket, Joy.MLLP.Framer.build_ack(msg, code))
+  defp send_ack(socket, msg, code, channel) do
+    resolved = ack_code(code, channel)
+    opts = [sending_app: channel.ack_sending_app, sending_fac: channel.ack_sending_fac]
+    ThousandIsland.Socket.send(socket, Joy.MLLP.Framer.build_ack(msg, resolved, opts))
   end
+
+  # Only override on success path; error ACK codes are never replaced.
+  defp ack_code(:aa, %{ack_code_override: override}) when is_binary(override) do
+    case override do
+      "AA" -> :aa
+      "AE" -> :ae
+      "AR" -> :ar
+      _    -> :aa
+    end
+  end
+  defp ack_code(code, _channel), do: code
 
   defp dispatch_to_pipeline(channel_id, entry_id) do
     case Horde.Registry.lookup(Joy.ChannelRegistry, {:pipeline, channel_id}) do

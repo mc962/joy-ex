@@ -1,6 +1,6 @@
 # Joy Roadmap
 
-Items 1–17 are complete. Items 18–22 are the next wave, in rough priority order.
+Items 1–18 are complete. Items 19–22 are the next wave, in rough priority order.
 
 ---
 
@@ -221,11 +221,15 @@ Items 1–17 are complete. Items 18–22 are the next wave, in rough priority or
 
 ---
 
-## 18. HL7 Acknowledgement Customization ⏳ Planned
+## 18. HL7 Acknowledgement Customization ✅ Implemented
 
-**Why:** Joy currently returns a hardcoded AA (Application Accept) ACK for every received message. Some downstream interfaces require AE (Application Error) or AR (Application Reject) responses under specific conditions, and some systems need custom MSH fields (sending application, facility) in the ACK to route it correctly.
+**Why:** Joy previously returned a hardcoded AA (Application Accept) ACK for every received message. Some downstream interfaces require AE or AR responses, and some systems need custom MSH fields (sending application, facility) in the ACK to route it correctly.
 
-**Plan:** Add per-channel ACK configuration: acknowledgement code override (AA/AE/AR), and template fields for MSH.3 (sending application) and MSH.4 (sending facility) in the ACK. Expose the config on the channel show page. `Joy.MLLP.Connection` reads the channel's ACK config when constructing the response.
+**What was built:**
+- `ack_code_override`, `ack_sending_app`, `ack_sending_fac` columns on `channels` table
+- `Joy.MLLP.Framer.build_ack/3` accepts optional `sending_app` / `sending_fac` overrides; nil values fall back to mirroring inbound MSH.5/MSH.6 (existing behaviour)
+- `Joy.MLLP.Connection.send_ack/4` resolves the ACK code via `ack_code/2`: if `ack_code_override` is set it replaces the success-path AA; error ACKs (AE for parse/persist failure) are never overridden
+- Channel show page: ACK Configuration section with success code dropdown and MSH.3/4 text inputs; changes take effect for new connections only (noted in UI); saves are audit-logged as `channel.ack_updated`
 
 ---
 

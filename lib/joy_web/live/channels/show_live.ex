@@ -84,6 +84,7 @@ defmodule JoyWeb.Channels.ShowLive do
           alert_form: to_form(Channels.Channel.changeset(channel, %{})),
           dispatch_form: to_form(Channels.Channel.changeset(channel, %{})),
           pin_form: to_form(Channels.Channel.changeset(channel, %{})),
+          ack_form: build_ack_form(channel),
           available_nodes: live_nodes()
         )
     end
@@ -460,6 +461,34 @@ defmodule JoyWeb.Channels.ShowLive do
     end
   end
 
+  def handle_event("save_ack_config", params, socket) do
+    if admin?(socket) do
+      attrs = %{
+        "ack_code_override" => nilify(params["ack_code_override"]),
+        "ack_sending_app"   => nilify(params["ack_sending_app"]),
+        "ack_sending_fac"   => nilify(params["ack_sending_fac"])
+      }
+      case Channels.update_channel(socket.assigns.channel, attrs) do
+        {:ok, updated} ->
+          Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.ack_updated",
+            "channel", updated.id, updated.name,
+            %{code_override: updated.ack_code_override,
+              sending_app: updated.ack_sending_app,
+              sending_fac: updated.ack_sending_fac})
+          {:noreply,
+           socket
+           |> assign(:channel, updated)
+           |> assign(:ack_form, build_ack_form(updated))
+           |> put_flash(:info, "ACK configuration saved.")}
+
+        {:error, cs} ->
+          {:noreply, assign(socket, :ack_form, to_form(cs))}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Admin access required.")}
+    end
+  end
+
   defp restart_if_running(channel, context) do
     if Joy.ChannelManager.channel_running?(channel.id) do
       Joy.ChannelManager.stop_channel(channel.id)
@@ -468,6 +497,17 @@ defmodule JoyWeb.Channels.ShowLive do
       end
     end
   end
+
+  defp build_ack_form(channel) do
+    to_form(%{
+      "ack_code_override" => channel.ack_code_override || "",
+      "ack_sending_app"   => channel.ack_sending_app   || "",
+      "ack_sending_fac"   => channel.ack_sending_fac   || ""
+    })
+  end
+
+  defp nilify(""), do: nil
+  defp nilify(v), do: v
 
   defp live_nodes do
     [node() | Node.list()]
@@ -917,6 +957,47 @@ defmodule JoyWeb.Channels.ShowLive do
               <button type="submit" class="btn btn-sm btn-primary">Save</button>
             </div>
           </.form>
+        </div>
+      </div>
+      <% end %>
+
+      <%!-- ACK Configuration (admin only) --%>
+      <%= if @current_scope.user.is_admin do %>
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-5">
+          <h3 class="font-semibold mb-1">ACK Configuration</h3>
+          <p class="text-sm text-base-content/50 mb-4">
+            Overrides applied to MLLP acknowledgement messages. Leave blank to use defaults
+            (AA on success, mirror sender fields from inbound MSH.3/4).
+            Changes take effect for new connections only.
+          </p>
+
+          <form phx-submit="save_ack_config" class="space-y-3">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div class="form-control">
+                <label class="label"><span class="label-text text-sm">Success ACK Code</span></label>
+                <select name="ack_code_override" class="select select-bordered select-sm">
+                  <option value="" selected={is_nil(@channel.ack_code_override)}>AA (default)</option>
+                  <option value="AA" selected={@channel.ack_code_override == "AA"}>AA — Application Accept</option>
+                  <option value="AE" selected={@channel.ack_code_override == "AE"}>AE — Application Error</option>
+                  <option value="AR" selected={@channel.ack_code_override == "AR"}>AR — Application Reject</option>
+                </select>
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text text-sm">MSH.3 Sending Application</span></label>
+                <input type="text" name="ack_sending_app" value={@channel.ack_sending_app || ""}
+                       placeholder="Mirror from inbound" class="input input-bordered input-sm" />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text text-sm">MSH.4 Sending Facility</span></label>
+                <input type="text" name="ack_sending_fac" value={@channel.ack_sending_fac || ""}
+                       placeholder="Mirror from inbound" class="input input-bordered input-sm" />
+              </div>
+            </div>
+            <div class="card-actions justify-end">
+              <button type="submit" class="btn btn-primary btn-sm">Save ACK Config</button>
+            </div>
+          </form>
         </div>
       </div>
       <% end %>
