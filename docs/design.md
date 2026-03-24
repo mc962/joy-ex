@@ -30,6 +30,7 @@ This document covers specific implementation decisions in Joy: why something was
 - [Non-Admin Read Access and the Two-Tier Auth Model](#non-admin-read-access-and-the-two-tier-auth-model)
 - [Audit Logging](#audit-logging)
 - [ACK Customization](#ack-customization)
+- [REST API Token Security](#rest-api-token-security)
 - [Known Gaps](#known-gaps)
 
 ---
@@ -785,6 +786,57 @@ Reloading the channel on every message would add a DB round-trip to the hot path
 ### MSH.3/4 override vs mirroring
 
 By default, the ACK's MSH.3 (sending application) is taken from the inbound message's MSH.5 (receiving application), and the ACK's MSH.4 (sending facility) from the inbound MSH.6 — the "mirror" convention required by HL7 2.x. Some interface engines ignore these fields; others route responses based on them. When `ack_sending_app` or `ack_sending_fac` is configured, `Framer.build_ack/3` uses the configured value instead of the mirrored one. A nil or empty override falls through to mirroring, so channels with no configuration are unaffected.
+
+---
+
+## REST API Token Security
+
+### Why hash instead of storing the plain token
+
+The `api_tokens` table stores `token_hash` (SHA-256 hex), never the plain token. If the `api_tokens` table is read by an attacker — via SQL injection, a compromised DB backup, or a misconfigured pg_dump — they get only hashes, not usable tokens. SHA-256 is not bcrypt: it is fast, which means a dictionary attack on a *guessable* token would be cheap. The `joy_` prefix followed by 32 random bytes (`Base.url_encode64(:crypto.strong_rand_bytes(32))`) provides 256 bits of entropy, which is not guessable by any dictionary attack. Bcrypt's cost factor buys nothing against a properly random token; bcrypt would only help if tokens were derived from passwords.
+
+### One-time display
+
+The plain token is returned exactly once from `Joy.ApiTokens.create_token/2` in the `{:ok, {plain, token}}` tuple, used to flash the value to the user, and then discarded. It is never written to the database, never logged, and never re-displayable from the settings page. After creation, the token row shows only the name, creation date, and last-used timestamp. This mirrors GitHub personal access tokens and is the standard model for API credentials.
+
+### `touch_last_used` async pattern
+
+Every authenticated API request should update `last_used_at` so operators can see stale tokens and revoke them. But writing to `api_tokens` on every request adds a synchronous DB write to the hot path. `JoyWeb.Plugs.ApiAuth` uses `Task.start/1` to fire the update in a background process:
+
+```elixir
+Task.start(fn -> Joy.ApiTokens.touch_last_used(token_id) end)
+```
+
+`Task.start` (not `Task.async`) is used because the result is not needed. The task is unlinked from the calling process so a failure does not crash the request. The consequence is that `last_used_at` may be slightly stale under high load, but it is always approximately correct. The alternative — skipping the update entirely — would make the field useless for detecting active vs dormant tokens.
+
+### Token prefix convention
+
+Tokens begin with `joy_` followed by 43 url-safe base64 characters (`Base.url_encode64(32 bytes)`). The prefix serves two purposes:
+
+1. **Recognizability** — in a config file or environment variable, `joy_abc123...` is obviously a Joy API token. This reduces accidental credential confusion.
+2. **Secret scanning** — tools like GitHub secret scanning or `trufflehog` can be configured with a regex pattern (`joy_[A-Za-z0-9_-]{43}`) to detect committed tokens. A generic random string has no such anchor.
+
+### Token expiry and the per-user limit
+
+Tokens expire after a configurable TTL (default 90 days, max 365). `verify_token/1` filters on `expires_at > now()`, so expired tokens are silently rejected without any explicit revocation step needed. This is the safety net that prevents indefinite accumulation.
+
+The per-user limit (10 active tokens) is enforced in `create_token/2`. Before checking the count, all expired tokens for that user are deleted:
+
+```elixir
+Repo.delete_all(from t in ApiToken,
+  where: t.user_id == ^user.id and t.expires_at <= ^now)
+
+count = Repo.aggregate(from(t in ApiToken, where: t.user_id == ^user.id), :count)
+if count >= @token_limit, do: {:error, :token_limit_reached}
+```
+
+This means the limit caps *active* tokens — expired tokens are garbage-collected on the next create attempt rather than by a background job. The query touches at most 10 rows (the maximum that could exist for one user), so it is effectively O(1) regardless of total table size.
+
+Why this design over a background cleanup job: a background job adds scheduling complexity and an operational concern (what if it falls behind?). Cleaning up at create time is simpler, guaranteed to run before the limit check, and has no meaningful performance cost given the 10-row bound.
+
+### Token ownership on user deletion
+
+The `api_tokens` table has `on_delete: :delete_all` on the `user_id` FK. Deleting a user removes all their tokens, immediately invalidating any active integrations using those tokens. This is intentional: tokens derive their authorization from the user (`is_admin`, `organization_id`), so tokens for a deleted user should have no remaining auth surface.
 
 ---
 

@@ -27,6 +27,13 @@ defmodule JoyWeb.Endpoint do
     only: JoyWeb.static_paths(),
     raise_on_missing_only: code_reloading?
 
+  # Serve favicon and web manifest files from a subdirectory at root paths,
+  # e.g. /favicon-32x32.png → priv/static/images/favicon/favicon-32x32.png
+  plug Plug.Static,
+    at: "/",
+    from: {:joy, "priv/static/images/favicon"},
+    gzip: false
+
   # Code reloading can be explicitly enabled under the
   # :code_reloader configuration of your endpoint.
   if code_reloading? do

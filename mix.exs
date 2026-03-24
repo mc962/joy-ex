@@ -79,6 +79,7 @@ defmodule Joy.MixProject do
       # Redis destination adapter
       {:redix, "~> 1.3"},
       {:horde, "~> 0.9"},
+      {:open_api_spex, "~> 3.21"},
       {:credo, "~> 1.7"}
     ]
   end

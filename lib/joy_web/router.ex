@@ -17,6 +17,17 @@ defmodule JoyWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :openapi do
+    plug :accepts, ["json", "html"]
+    plug OpenApiSpex.Plug.PutApiSpec, module: JoyWeb.API.ApiSpec
+  end
+
+  pipeline :api_auth do
+    plug :accepts, ["json"]
+    plug OpenApiSpex.Plug.PutApiSpec, module: JoyWeb.API.ApiSpec
+    plug JoyWeb.Plugs.ApiAuth
+  end
+
   scope "/", JoyWeb do
     pipe_through [:browser, :require_authenticated_user]
 
@@ -50,6 +61,44 @@ defmodule JoyWeb.Router do
     end
   end
 
+  # OpenAPI spec — unauthenticated, read-only
+  scope "/api" do
+    pipe_through :openapi
+    get "/v1/openapi.json", OpenApiSpex.Plug.RenderSpec, []
+  end
+
+  # Scalar API docs UI — unauthenticated
+  scope "/api", JoyWeb do
+    pipe_through :openapi
+    get "/docs", ApiDocsController, :index
+  end
+
+  # Token creation — unauthenticated (you're calling this to get a token)
+  scope "/api/v1", JoyWeb.API.V1 do
+    pipe_through :api
+    post "/tokens", TokenController, :create
+  end
+
+  scope "/api/v1", JoyWeb.API.V1 do
+    pipe_through :api_auth
+
+    delete "/tokens/:id", TokenController, :delete
+
+    resources "/channels", ChannelController, only: [:index, :show, :create, :update, :delete] do
+      post "/start",  ChannelController, :start
+      post "/stop",   ChannelController, :stop
+      post "/pause",  ChannelController, :pause
+      post "/resume", ChannelController, :resume
+      resources "/destinations", DestinationController, only: [:index, :create, :update, :delete]
+      resources "/messages", MessageLogController, only: [:index] do
+        post "/retry", MessageLogController, :retry
+      end
+    end
+
+    resources "/organizations", OrganizationController, only: [:index, :show, :create, :update, :delete]
+    post "/retention/purge", RetentionController, :purge
+  end
+
   if Application.compile_env(:joy, :dev_routes) do
     import Phoenix.LiveDashboard.Router
 
@@ -72,9 +121,11 @@ defmodule JoyWeb.Router do
   scope "/", JoyWeb do
     pipe_through [:browser, :require_authenticated_user]
 
-    get "/users/settings", UserSettingsController, :edit
-    put "/users/settings", UserSettingsController, :update
-    get "/users/settings/confirm-email/:token", UserSettingsController, :confirm_email
+    get    "/users/settings", UserSettingsController, :edit
+    put    "/users/settings", UserSettingsController, :update
+    get    "/users/settings/confirm-email/:token", UserSettingsController, :confirm_email
+    post   "/users/settings/tokens", UserSettingsController, :create_token
+    delete "/users/settings/tokens/:id", UserSettingsController, :revoke_token
   end
 
   scope "/", JoyWeb do

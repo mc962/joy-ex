@@ -46,4 +46,75 @@
       Save Password
     </.button>
   </.form>
+
+  <div class="divider" />
+
+  <%!-- New token created — show once --%>
+  <div :if={@flash[:token_created]} class="alert alert-success mb-4">
+    <.icon name="hero-key" class="w-5 h-5 shrink-0" />
+    <div>
+      <p class="font-medium">Token created — copy it now. It will not be shown again.</p>
+      <code class="font-mono text-sm break-all select-all">{@flash[:token_created]}</code>
+    </div>
+  </div>
+
+  <h2 class="text-lg font-semibold mb-3">API Tokens</h2>
+  <p class="text-sm text-base-content/60 mb-4">
+    Bearer tokens for the <code class="font-mono">/api/v1</code> REST API.
+    Tokens inherit your account permissions. Treat them like passwords.
+  </p>
+
+  <div :if={@api_tokens == []} class="text-sm text-base-content/40 mb-4">
+    No tokens yet.
+  </div>
+
+  <div :if={@api_tokens != []} class="overflow-x-auto mb-4">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Created</th>
+          <th>Expires</th>
+          <th>Last used</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr :for={token <- @api_tokens} class="hover">
+          <td class="font-medium">{token.name}</td>
+          <td class="text-xs text-base-content/60">
+            {Calendar.strftime(token.inserted_at, "%Y-%m-%d")}
+          </td>
+          <td class="text-xs text-base-content/60">
+            {Calendar.strftime(token.expires_at, "%Y-%m-%d")}
+          </td>
+          <td class="text-xs text-base-content/60">
+            {if token.last_used_at,
+              do: Calendar.strftime(token.last_used_at, "%Y-%m-%d %H:%M UTC"),
+              else: "Never"}
+          </td>
+          <td>
+            <form action={~p"/users/settings/tokens/#{token.id}"} method="post">
+              <input type="hidden" name="_method" value="delete" />
+              <input type="hidden" name="_csrf_token" value={Plug.CSRFProtection.get_csrf_token()} />
+              <button type="submit" class="btn btn-ghost btn-xs text-error"
+                      data-confirm="Revoke this token? Any scripts using it will stop working.">
+                Revoke
+              </button>
+            </form>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <form action={~p"/users/settings/tokens"} method="post" class="flex gap-2 items-end">
+    <input type="hidden" name="_csrf_token" value={Plug.CSRFProtection.get_csrf_token()} />
+    <div class="form-control flex-1 max-w-xs">
+      <label class="label py-1"><span class="label-text text-sm">Token name</span></label>
+      <input type="text" name="token[name]" required placeholder="e.g. CI deploy key"
+             class="input input-bordered input-sm" />
+    </div>
+    <button type="submit" class="btn btn-primary btn-sm">Create Token</button>
+  </form>
 </Layouts.app>

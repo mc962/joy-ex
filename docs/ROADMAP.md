@@ -1,6 +1,6 @@
 # Joy Roadmap
 
-Items 1–18 are complete. Items 19–22 are the next wave, in rough priority order.
+Items 1–18, 21, and 22 are complete. Items 19 and 20 remain.
 
 ---
 
@@ -249,16 +249,35 @@ Items 1–18 are complete. Items 19–22 are the next wave, in rough priority or
 
 ---
 
-## 21. REST API Layer ⏳ Planned
+## 21. REST API Layer ✅ Implemented
 
 **Why:** The LiveView UI is the only way to manage Joy today. Integrators need to provision channels, manage destinations, trigger retries, and query message log entries programmatically — for IaC tooling, CI pipelines, and embedding Joy into broader platform automation.
 
-**Plan:** Add a `/api/v1` scope in the router protected by Bearer token authentication (API keys stored as hashed tokens in a new `api_tokens` table, scoped to a user or org). Expose JSON endpoints covering the core resources: channels (CRUD, start/stop/pause/resume), organizations (CRUD), destinations (CRUD), message log (list, retry), and retention (trigger purge). Controller logic delegates to the existing context modules — no new business logic, just a new transport layer. API tokens are managed from the user settings page.
+**What was built:**
+- `api_tokens` table: `user_id` (FK delete_all), `name`, `token_hash` (SHA-256 hex, unique), `last_used_at`, `inserted_at`; no updated_at — tokens are immutable
+- `Joy.ApiTokens` context: `create_token/2` generates `"joy_"` prefixed random token (shown once, never stored plain), `verify_token/1` (hash lookup → user), `touch_last_used/1` (async, non-blocking), `list_tokens/1`, `revoke_token/2`
+- `JoyWeb.Plugs.ApiAuth`: extracts `Authorization: Bearer <token>`, hashes it, populates `current_scope`; returns 401 on failure; updates `last_used_at` via `Task.start`
+- `JoyWeb.FallbackController`: handles `{:error, changeset}` → 422 with traversed field errors, `{:error, :not_found}` → 404, `{:error, :unauthorized}` → 403
+- `/api/v1` scope behind `:api_auth` pipeline with controllers for:
+  - `ChannelController` — CRUD + start/stop/pause/resume lifecycle actions; JSON excludes `tls_key_pem`; includes live `running` status
+  - `OrganizationController` — CRUD
+  - `DestinationController` — CRUD nested under channels; JSON excludes `config` map (may contain credentials)
+  - `MessageLogController` — list with `limit`/`status`/`message_type`/`patient_id` filters; per-entry retry
+  - `RetentionController` — `POST /retention/purge` (admin-only, sync)
+- All mutations and lifecycle actions require `is_admin`; read endpoints are open to all valid tokens
+- Token management on the user settings page (`/users/settings`): create (name input, plain token shown once in flash), list (name, created, last used), revoke (per-token delete form)
 
 ---
 
-## 22. OpenAPI / Swagger Docs ⏳ Planned
+## 22. OpenAPI / Swagger Docs ✅ Implemented
 
 **Why:** A REST API without a machine-readable schema forces integrators to read source code. An OpenAPI spec enables generated client SDKs, Postman collections, and in-browser interactive docs with no extra integration work.
 
-**Plan:** Add `open_api_spex` as a dependency. Annotate API controllers with request/response schemas. Expose the spec at `/api/v1/openapi.json` and mount Swagger UI at `/api/docs` (unauthenticated, read-only). Schemas live in `lib/joy_web/api/schemas/` alongside the controllers. Implement item 21 first — OpenAPI annotations are added as part of or immediately after the controller layer is in place.
+**What was built:**
+- `open_api_spex ~> 3.22` added as a dependency
+- `JoyWeb.API.ApiSpec` — root `OpenApi` struct with title, version, server, component schemas, and `BearerAuth` security scheme; built from router paths via `Paths.from_router/1`
+- `JoyWeb.API.Schemas` — schema definitions for all response/request types: `Channel`, `ChannelList`, `ChannelResponse`, `ChannelParams`, `Organization`, `OrganizationList`, `OrganizationResponse`, `OrganizationParams`, `Destination`, `DestinationList`, `DestinationResponse`, `DestinationParams`, `MessageLogEntry`, `MessageLogList`, `MessageLogEntryResponse`, `PurgeResult`, `StatusResponse`, `ErrorResponse`
+- All five API controllers annotated with `use OpenApiSpex.ControllerSpecs` — `tags`, `security`, and per-action `operation` macros covering summary, path parameters, request bodies, and typed responses
+- `GET /api/v1/openapi.json` — renders the spec as JSON (unauthenticated)
+- `GET /api/docs` — Swagger UI pointing at the spec (unauthenticated, read-only)
+- `OpenApiSpex.Plug.PutApiSpec` in the `:api_auth` pipeline so the spec is available for future request validation

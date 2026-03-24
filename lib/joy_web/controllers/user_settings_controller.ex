@@ -67,11 +67,36 @@ defmodule JoyWeb.UserSettingsController do
     end
   end
 
+  def create_token(conn, %{"token" => %{"name" => name}}) do
+    user = conn.assigns.current_scope.user
+
+    case Joy.ApiTokens.create_token(user, %{"name" => name}) do
+      {:ok, {plain, _token}} ->
+        conn
+        |> put_flash(:token_created, plain)
+        |> redirect(to: ~p"/users/settings")
+
+      {:error, :token_limit_reached} ->
+        conn
+        |> put_flash(:error, "Token limit reached (10 max). Revoke an existing token first.")
+        |> redirect(to: ~p"/users/settings")
+    end
+  end
+
+  def revoke_token(conn, %{"id" => id}) do
+    Joy.ApiTokens.revoke_token(conn.assigns.current_scope.user, id)
+
+    conn
+    |> put_flash(:info, "API token revoked.")
+    |> redirect(to: ~p"/users/settings")
+  end
+
   defp assign_email_and_password_changesets(conn, _opts) do
     user = conn.assigns.current_scope.user
 
     conn
     |> assign(:email_changeset, Accounts.change_user_email(user))
     |> assign(:password_changeset, Accounts.change_user_password(user))
+    |> assign(:api_tokens, Joy.ApiTokens.list_tokens(user))
   end
 end

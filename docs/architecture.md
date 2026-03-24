@@ -13,6 +13,7 @@ Joy is an HL7 v2.x integration engine: it receives HL7 messages over MLLP (TCP),
 - [HL7 Representation](#hl7-representation)
 - [Clustering](#clustering)
 - [Web Interface](#web-interface)
+- [REST API](#rest-api)
 - [Dispatch Concurrency](#dispatch-concurrency)
 - [Organizations](#organizations)
 - [Message Log Retention](#message-log-retention)
@@ -338,10 +339,82 @@ The router splits routes into two Phoenix live sessions:
 | `/tools/sinks` | `:admin` | View in-memory sink contents for testing destinations |
 | `/tools/retention` | `:admin` | Message log retention settings and manual purge controls |
 | `/audit` | `:admin` | Audit log — filterable history of admin mutations |
+| `/users/settings` | `:app` | Account settings — email, password, API token management |
+| `/api/docs` | (none) | Scalar — interactive OpenAPI documentation |
 
 ### Real-time updates
 
 The dashboard and channel pages use Phoenix LiveView. Pipeline stats (processed count, error count, last message time) are broadcast over PubSub on `"channel:#{id}:stats"` and automatically push to connected browsers. The message log page subscribes to `"message_log:#{id}"` and streams new entries in real time.
+
+---
+
+## REST API
+
+Joy exposes a `/api/v1` REST API for programmatic access to channels, organizations, destinations, the message log, and retention. It mirrors the LiveView UI's capabilities: the same context functions are called from both surfaces, with no separate business logic layer.
+
+### Authentication
+
+API requests are authenticated with **Bearer tokens** (`Authorization: Bearer <token>`). Tokens are:
+
+- Created via the `/users/settings` page or `POST /api/v1/tokens` (email + password)
+- Shown in plaintext exactly once on creation — only the SHA-256 hash is stored
+- Prefixed with `joy_` for recognizability in configs and logs
+- Valid for 1–90 days (default 90); expired tokens are rejected automatically
+- Capped at 10 active tokens per user; expired tokens are cleaned up on each new creation
+
+The `JoyWeb.Plugs.ApiAuth` plug extracts the header, hashes the token with SHA-256, looks up a non-expired matching row, and assigns `current_scope` identically to the LiveView session model. `last_used_at` is updated asynchronously via `Task.start` to avoid blocking the request.
+
+### Authorization
+
+The same `is_admin` flag used by LiveViews applies to the API:
+
+- **Read-only endpoints** (list/show channels, organizations, message log): open to any authenticated token.
+- **Mutations** (create/update/delete channels and orgs, lifecycle actions, destination changes, retention purge, message retry): require `is_admin: true` on the token's user; return 403 otherwise.
+
+### Routes
+
+| Path | Methods | Purpose |
+|---|---|---|
+| `/api/v1/channels` | GET, POST | List channels; create channel |
+| `/api/v1/channels/:id` | GET, PUT, DELETE | Get/update/delete a channel |
+| `/api/v1/channels/:id/start` | POST | Start the channel's MLLP server |
+| `/api/v1/channels/:id/stop` | POST | Stop the channel's MLLP server |
+| `/api/v1/channels/:id/pause` | POST | Pause message dispatch |
+| `/api/v1/channels/:id/resume` | POST | Resume message dispatch |
+| `/api/v1/channels/:id/destinations` | GET, POST | List destinations; create destination |
+| `/api/v1/channels/:id/destinations/:id` | PUT, DELETE | Update/delete a destination |
+| `/api/v1/channels/:id/messages` | GET | List message log entries (filterable) |
+| `/api/v1/channels/:id/messages/:id/retry` | POST | Retry a failed message (admin) |
+| `/api/v1/organizations` | GET, POST | List orgs; create org |
+| `/api/v1/organizations/:id` | GET, PUT, DELETE | Get/update/delete an org |
+| `/api/v1/retention/purge` | POST | Trigger a synchronous retention purge (admin) |
+| `/api/v1/tokens` | POST | Create a Bearer token (unauthenticated — accepts email + password) |
+| `/api/v1/tokens/:id` | DELETE | Revoke one of the authenticated user's tokens |
+| `/api/v1/openapi.json` | GET | OpenAPI 3.0 spec (unauthenticated) |
+| `/api/docs` | GET | Scalar — interactive API documentation (unauthenticated) |
+
+### OpenAPI / Scalar
+
+`JoyWeb.API.ApiSpec` implements `OpenApiSpex.OpenApi` and builds the spec from the router using `OpenApiSpex.Paths.from_router/1`. All controllers are annotated with `use OpenApiSpex.ControllerSpecs` and declare `tags`, `security`, and per-action `operation` macros. The spec is served as JSON at `/api/v1/openapi.json` and rendered by **Scalar** (loaded from CDN) at `/api/docs`. Both are unauthenticated so integration teams can browse the API without credentials.
+
+### Error format
+
+`JoyWeb.FallbackController` normalizes errors:
+
+| Condition | HTTP status | Body |
+|---|---|---|
+| `{:error, %Ecto.Changeset{}}` | 422 Unprocessable Entity | `%{errors: %{field: ["message"]}}` |
+| `{:error, :not_found}` | 404 Not Found | `%{errors: %{detail: "Not found"}}` |
+| `{:error, :unauthorized}` | 403 Forbidden | `%{errors: %{detail: "Admin access required"}}` |
+| `{:error, :invalid_credentials}` | 401 Unauthorized | `%{errors: %{detail: "Invalid email or password"}}` |
+| `{:error, :token_limit_reached}` | 422 Unprocessable Entity | `%{errors: %{detail: "Token limit reached (10 max)..."}}` |
+
+### Sensitive field exclusions
+
+Two fields are never included in API responses:
+
+- `channels.tls_key_pem` — private key material
+- `destination_configs.config` — may contain adapter credentials (API keys, passwords, connection strings)
 
 ---
 
@@ -436,7 +509,7 @@ Indexes on `actor_id`, `resource_type`, and `inserted_at` support the filter que
 
 ## Data Model
 
-Nine tables, all in the `joy` Postgres database:
+Ten tables, all in the `joy` Postgres database:
 
 ```
 organizations
@@ -462,6 +535,10 @@ channels
   alert_email (string)
   alert_webhook_url (string)
   alert_cooldown_minutes (int)     — minimum minutes between alerts for the same channel
+  ack_code_override (string)       — "AA", "AE", or "AR"; overrides success-path ACK code if set
+  ack_sending_app (string)         — overrides MSH.3 in ACK responses; nil = mirror MSH.5 from inbound
+  ack_sending_fac (string)         — overrides MSH.4 in ACK responses; nil = mirror MSH.6 from inbound
+  pinned_node (string)             — Erlang node name to pin this channel to; nil = Horde placement
 
 transform_steps
   id, channel_id (FK), name, script, enabled, position, inserted_at, updated_at
@@ -483,6 +560,15 @@ users  (phx.gen.auth standard)
 
 user_tokens  (phx.gen.auth standard)
   id, user_id (FK), token, context, sent_to, inserted_at
+
+api_tokens
+  id, user_id (FK → users, delete_all), name (string)
+  token_hash (string, unique index)  — SHA-256 hex of the plain token; plain token is shown once and never stored
+  expires_at (utc_datetime)          — defaults to 90 days; configurable at creation (1–90 days max); enforced in verify_token
+  last_used_at (utc_datetime)        — updated asynchronously on each authenticated request
+  inserted_at (utc_datetime)         — no updated_at; tokens are immutable after creation
+  INDEX user_id
+  Max 10 active tokens per user; expired tokens are deleted at create_token time before the limit is checked
 
 retention_settings  (single row — created on first access)
   id, retention_days (default 90), schedule_enabled, schedule_hour (UTC, default 2)
