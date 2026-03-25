@@ -16,7 +16,7 @@ defmodule JoyWeb.API.V1.ChannelController do
     responses: [ok: {"Channel list", "application/json", Schemas.ChannelList}]
 
   def index(conn, _params) do
-    channels = Channels.list_channels()
+    channels = Channels.list_channels(conn.assigns.current_scope)
     json(conn, %{data: Enum.map(channels, &serialize/1)})
   end
 
@@ -29,7 +29,7 @@ defmodule JoyWeb.API.V1.ChannelController do
     ]
 
   def show(conn, %{"id" => id}) do
-    with {:ok, channel} <- fetch_channel(id) do
+    with {:ok, channel} <- fetch_channel(id, conn.assigns.current_scope) do
       json(conn, %{data: serialize(channel)})
     end
   end
@@ -62,7 +62,7 @@ defmodule JoyWeb.API.V1.ChannelController do
 
   def update(conn, %{"id" => id, "channel" => params}) do
     with :ok <- require_admin(conn),
-         {:ok, channel} <- fetch_channel(id),
+         {:ok, channel} <- fetch_channel(id, conn.assigns.current_scope),
          {:ok, updated} <- Channels.update_channel(channel, params) do
       json(conn, %{data: serialize(updated)})
     end
@@ -78,7 +78,7 @@ defmodule JoyWeb.API.V1.ChannelController do
 
   def delete(conn, %{"id" => id}) do
     with :ok <- require_admin(conn),
-         {:ok, channel} <- fetch_channel(id),
+         {:ok, channel} <- fetch_channel(id, conn.assigns.current_scope),
          {:ok, _} <- Channels.delete_channel(channel) do
       send_resp(conn, :no_content, "")
     end
@@ -91,7 +91,7 @@ defmodule JoyWeb.API.V1.ChannelController do
 
   def start(conn, %{"channel_id" => id}) do
     with :ok <- require_admin(conn),
-         {:ok, channel} <- fetch_channel(id) do
+         {:ok, channel} <- fetch_channel(id, conn.assigns.current_scope) do
       ChannelManager.start_channel(channel)
       Channels.set_started(channel, true)
       json(conn, %{data: %{status: "started"}})
@@ -105,7 +105,7 @@ defmodule JoyWeb.API.V1.ChannelController do
 
   def stop(conn, %{"channel_id" => id}) do
     with :ok <- require_admin(conn),
-         {:ok, channel} <- fetch_channel(id) do
+         {:ok, channel} <- fetch_channel(id, conn.assigns.current_scope) do
       ChannelManager.stop_channel(channel.id)
       Channels.set_started(channel, false)
       json(conn, %{data: %{status: "stopped"}})
@@ -119,7 +119,7 @@ defmodule JoyWeb.API.V1.ChannelController do
 
   def pause(conn, %{"channel_id" => id}) do
     with :ok <- require_admin(conn),
-         {:ok, channel} <- fetch_channel(id) do
+         {:ok, channel} <- fetch_channel(id, conn.assigns.current_scope) do
       ChannelManager.pause_channel(channel.id)
       json(conn, %{data: %{status: "paused"}})
     end
@@ -132,15 +132,15 @@ defmodule JoyWeb.API.V1.ChannelController do
 
   def resume(conn, %{"channel_id" => id}) do
     with :ok <- require_admin(conn),
-         {:ok, channel} <- fetch_channel(id) do
+         {:ok, channel} <- fetch_channel(id, conn.assigns.current_scope) do
       ChannelManager.resume_channel(channel.id)
       json(conn, %{data: %{status: "resumed"}})
     end
   end
 
-  defp fetch_channel(id) do
+  defp fetch_channel(id, scope) do
     try do
-      {:ok, Channels.get_channel!(String.to_integer(id))}
+      {:ok, Channels.get_channel!(String.to_integer(id), scope)}
     rescue
       Ecto.NoResultsError -> {:error, :not_found}
       ArgumentError -> {:error, :not_found}

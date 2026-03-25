@@ -4,7 +4,7 @@ defmodule JoyWeb.MessageLog.IndexLive do
 
   @impl true
   def mount(%{"id" => ch_id}, _session, socket) do
-    channel = Joy.Channels.get_channel!(String.to_integer(ch_id))
+    channel = Joy.Channels.get_channel!(String.to_integer(ch_id), socket.assigns.current_scope)
     entries = Joy.MessageLog.list_recent(channel.id, limit: 100)
 
     if connected?(socket) do

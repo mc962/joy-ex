@@ -7,7 +7,7 @@ defmodule JoyWeb.Organizations.IndexLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Joy.PubSub, "organizations")
-    orgs = Organizations.list_organizations()
+    orgs = Organizations.list_organizations(socket.assigns.current_scope)
 
     {:ok,
      socket
@@ -61,7 +61,7 @@ defmodule JoyWeb.Organizations.IndexLive do
           {:noreply,
            socket
            |> assign(:show_modal, false)
-           |> assign(:organizations, Organizations.list_organizations())
+           |> assign(:organizations, Organizations.list_organizations(socket.assigns.current_scope))
            |> put_flash(:info, "Organization saved")
            |> push_navigate(to: ~p"/organizations/#{org.id}")}
 
@@ -78,7 +78,7 @@ defmodule JoyWeb.Organizations.IndexLive do
       org = Organizations.get_organization!(String.to_integer(id))
       {:ok, _} = Organizations.delete_organization(org)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "organization.deleted", "organization", org.id, org.name)
-      {:noreply, assign(socket, :organizations, Organizations.list_organizations())}
+      {:noreply, assign(socket, :organizations, Organizations.list_organizations(socket.assigns.current_scope))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
@@ -86,7 +86,7 @@ defmodule JoyWeb.Organizations.IndexLive do
 
   @impl true
   def handle_info({event, _}, socket) when event in [:org_created, :org_deleted, :org_updated] do
-    {:noreply, assign(socket, :organizations, Organizations.list_organizations())}
+    {:noreply, assign(socket, :organizations, Organizations.list_organizations(socket.assigns.current_scope))}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}

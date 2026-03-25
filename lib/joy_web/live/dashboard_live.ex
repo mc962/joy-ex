@@ -4,7 +4,8 @@ defmodule JoyWeb.DashboardLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    channels = Joy.Channels.list_channels()
+    scope    = socket.assigns.current_scope
+    channels = Joy.Channels.list_channels(scope)
     channel_stats = load_all_stats(channels)
     recent_errors = Joy.MessageLog.list_recent(nil, limit: 10, status: "failed")
     total_failed = Joy.MessageLog.count_all_failed()
@@ -37,7 +38,7 @@ defmodule JoyWeb.DashboardLive do
 
   def handle_info({event, _payload}, socket)
       when event in [:channel_created, :channel_deleted] do
-    channels = Joy.Channels.list_channels()
+    channels = Joy.Channels.list_channels(socket.assigns.current_scope)
     {:noreply,
      socket
      |> assign(:channels, channels)
@@ -49,7 +50,7 @@ defmodule JoyWeb.DashboardLive do
   end
 
   def handle_info({:channel_updated, _}, socket) do
-    channels = Joy.Channels.list_channels()
+    channels = Joy.Channels.list_channels(socket.assigns.current_scope)
     {:noreply,
      socket
      |> assign(:channels, channels)
@@ -63,7 +64,7 @@ defmodule JoyWeb.DashboardLive do
   def handle_event("start_channel", %{"id" => id}, socket) do
     if admin?(socket) do
       id = String.to_integer(id)
-      channel = Joy.Channels.get_channel!(id)
+      channel = Joy.Channels.get_channel!(id, socket.assigns.current_scope)
       Joy.ChannelManager.start_channel(channel)
       Joy.Channels.set_started(channel, true)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.started", "channel", id, channel.name)
@@ -76,7 +77,7 @@ defmodule JoyWeb.DashboardLive do
   def handle_event("stop_channel", %{"id" => id}, socket) do
     if admin?(socket) do
       id = String.to_integer(id)
-      channel = Joy.Channels.get_channel!(id)
+      channel = Joy.Channels.get_channel!(id, socket.assigns.current_scope)
       Joy.ChannelManager.stop_channel(id)
       Joy.Channels.set_started(channel, false)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.stopped", "channel", id, channel.name)
@@ -89,7 +90,7 @@ defmodule JoyWeb.DashboardLive do
   def handle_event("pause_channel", %{"id" => id}, socket) do
     if admin?(socket) do
       id = String.to_integer(id)
-      channel = Joy.Channels.get_channel!(id)
+      channel = Joy.Channels.get_channel!(id, socket.assigns.current_scope)
       Joy.ChannelManager.pause_channel(id)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.paused", "channel", id, channel.name)
       {:noreply, assign(socket, :paused_ids, MapSet.put(socket.assigns.paused_ids, id))}
@@ -101,7 +102,7 @@ defmodule JoyWeb.DashboardLive do
   def handle_event("resume_channel", %{"id" => id}, socket) do
     if admin?(socket) do
       id = String.to_integer(id)
-      channel = Joy.Channels.get_channel!(id)
+      channel = Joy.Channels.get_channel!(id, socket.assigns.current_scope)
       Joy.ChannelManager.resume_channel(id)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.resumed", "channel", id, channel.name)
       {:noreply, assign(socket, :paused_ids, MapSet.delete(socket.assigns.paused_ids, id))}

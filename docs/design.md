@@ -26,6 +26,7 @@ This document covers specific implementation decisions in Joy: why something was
 - [Message Search: Extract at Persist Time](#message-search-extract-at-persist-time)
 - [Sinks: Design as a Test Tool](#sinks-design-as-a-test-tool)
 - [Organizations: Channel Grouping](#organizations-channel-grouping)
+- [Multi-Tenancy / Scoped Auth](#multi-tenancy--scoped-auth)
 - [Message Log Retention](#message-log-retention)
 - [Non-Admin Read Access and the Two-Tier Auth Model](#non-admin-read-access-and-the-two-tier-auth-model)
 - [Audit Logging](#audit-logging)
@@ -648,6 +649,48 @@ end
 
 ---
 
+## Multi-Tenancy / Scoped Auth
+
+### Scoping rules
+
+Access control for reads is governed by `Joy.Accounts.Scope.org_id/1`:
+
+| Caller | `org_id/1` returns | Effect |
+|---|---|---|
+| Admin user (`is_admin: true`) | `nil` | No WHERE clause — sees all orgs |
+| User with `organization_id = nil` | `nil` | No WHERE clause — single-tenant compat |
+| User with `organization_id = X` | `X` | `WHERE organization_id = X` |
+| Service account | `nil` | No WHERE clause — read-all |
+
+Admin users and nil-org users are treated identically at the query level (both unscoped). The distinction remains at the mutation layer — only `is_admin` can write.
+
+### Where the filter is applied
+
+`apply_org_filter/2` is a private helper in both `Joy.Channels` and `Joy.Organizations`. It adds a `where` clause to the Ecto query when `org_id` is non-nil:
+
+```elixir
+defp apply_org_filter(query, scope) do
+  case scope && Scope.org_id(scope) do
+    nil    -> query
+    org_id -> where(query, [c], c.organization_id == ^org_id)
+  end
+end
+```
+
+For `Joy.Organizations`, the filter is on the org's own `id` (a user in org X sees only org X). For `Joy.Channels`, it is on `channel.organization_id`. For `Joy.MessageLog.list_all_failed/2`, an `INNER JOIN channels` is added with the org filter on `channels.organization_id`.
+
+`list_started_channels/0` is intentionally unscoped — it is called by `Joy.ChannelManager` at boot with no user context, to restart channels that were running before a restart.
+
+### 404 not 403 for cross-org fetches
+
+A scoped user requesting a resource from another org receives `Ecto.NoResultsError` (→ 404), not a 403. This is intentional: returning 404 avoids confirming to the caller that a resource with that ID exists at all. 403 would be an information leak in a multi-tenant context.
+
+### Why mutations are not scoped
+
+All mutations are already guarded by `require_admin` / `admin?(socket)`. An admin user is never org-scoped (see table above), so mutations always operate on the full dataset regardless. There is no scenario where an org-scoped user can reach a mutation handler — they would get "Admin access required" first.
+
+---
+
 ## Message Log Retention
 
 ### Archive-before-delete invariant
@@ -748,7 +791,7 @@ The `changes` map records only the fields that changed, using a simple before/af
 
 Joy does not log individual read operations (page views, message lookups). In a HIPAA context the full requirement is tracking who accessed PHI and when; per-read logging would satisfy that completely, but at the cost of very high volume and low signal-to-noise ratio.
 
-The chosen trade-off: log authentication events instead. Any PHI visible to an authenticated user was accessible during their session, so a login record is a bounded proxy for read access — it proves a specific identity had access from login time onward. This is sufficient for the current single-tenant model where all authenticated users can see all data.
+The chosen trade-off: log authentication events instead. Any PHI visible to an authenticated user was accessible during their session, so a login record is a bounded proxy for read access — it proves a specific identity had access from login time onward. For org-scoped users, "all data" means only their org's channels and message log; admins and nil-org users see all data.
 
 **What is logged:**
 

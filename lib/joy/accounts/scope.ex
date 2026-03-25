@@ -30,4 +30,15 @@ defmodule Joy.Accounts.Scope do
   @doc "Returns true only for human users with is_admin set."
   def admin?(%__MODULE__{user: %{is_admin: true}}), do: true
   def admin?(_), do: false
+
+  @doc """
+  Returns the organization_id to filter queries by, or nil for unscoped access.
+
+  Admins see everything (nil). Users with no org see everything (nil, preserves
+  single-tenant behaviour). Users with an org see only their org's resources.
+  Service accounts have no org and see everything.
+  """
+  def org_id(%__MODULE__{user: %{is_admin: true}}), do: nil
+  def org_id(%__MODULE__{user: %{organization_id: id}}), do: id
+  def org_id(_), do: nil
 end

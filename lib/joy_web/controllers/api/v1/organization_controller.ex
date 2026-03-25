@@ -15,7 +15,7 @@ defmodule JoyWeb.API.V1.OrganizationController do
     responses: [ok: {"Organization list", "application/json", Schemas.OrganizationList}]
 
   def index(conn, _params) do
-    orgs = Organizations.list_organizations()
+    orgs = Organizations.list_organizations(conn.assigns.current_scope)
     json(conn, %{data: Enum.map(orgs, &serialize/1)})
   end
 
@@ -28,7 +28,7 @@ defmodule JoyWeb.API.V1.OrganizationController do
     ]
 
   def show(conn, %{"id" => id}) do
-    with {:ok, org} <- fetch_org(id) do
+    with {:ok, org} <- fetch_org(id, conn.assigns.current_scope) do
       json(conn, %{data: serialize(org)})
     end
   end
@@ -61,7 +61,7 @@ defmodule JoyWeb.API.V1.OrganizationController do
 
   def update(conn, %{"id" => id, "organization" => params}) do
     with :ok <- require_admin(conn),
-         {:ok, org} <- fetch_org(id),
+         {:ok, org} <- fetch_org(id, conn.assigns.current_scope),
          {:ok, updated} <- Organizations.update_organization(org, params) do
       json(conn, %{data: serialize(updated)})
     end
@@ -77,15 +77,15 @@ defmodule JoyWeb.API.V1.OrganizationController do
 
   def delete(conn, %{"id" => id}) do
     with :ok <- require_admin(conn),
-         {:ok, org} <- fetch_org(id),
+         {:ok, org} <- fetch_org(id, conn.assigns.current_scope),
          {:ok, _} <- Organizations.delete_organization(org) do
       send_resp(conn, :no_content, "")
     end
   end
 
-  defp fetch_org(id) do
+  defp fetch_org(id, scope) do
     try do
-      {:ok, Organizations.get_organization!(String.to_integer(id))}
+      {:ok, Organizations.get_organization!(String.to_integer(id), scope)}
     rescue
       Ecto.NoResultsError -> {:error, :not_found}
       ArgumentError -> {:error, :not_found}

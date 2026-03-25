@@ -4,8 +4,9 @@ defmodule JoyWeb.Messages.FailedLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    entries = Joy.MessageLog.list_all_failed(limit: 200)
-    channels = Joy.Channels.list_channels()
+    scope    = socket.assigns.current_scope
+    entries  = Joy.MessageLog.list_all_failed(scope, limit: 200)
+    channels = Joy.Channels.list_channels(scope)
     channel_map = Map.new(channels, &{&1.id, &1})
 
     {:ok,

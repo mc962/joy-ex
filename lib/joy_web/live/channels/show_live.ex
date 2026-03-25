@@ -13,7 +13,7 @@ defmodule JoyWeb.Channels.ShowLive do
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    channel = Channels.get_channel!(String.to_integer(id))
+    channel = Channels.get_channel!(String.to_integer(id), socket.assigns.current_scope)
     running? = Joy.ChannelManager.channel_running?(channel.id)
 
     stats =

@@ -16,7 +16,7 @@ Joy is an HL7 v2.x integration engine: it receives HL7 messages over MLLP (TCP),
 - [REST API](#rest-api)
 - [Service Accounts](#service-accounts)
 - [Dispatch Concurrency](#dispatch-concurrency)
-- [Organizations](#organizations)
+- [Organizations and Multi-Tenancy](#organizations-and-multi-tenancy)
 - [Message Log Retention](#message-log-retention)
 - [Audit Logging](#audit-logging)
 - [Data Model](#data-model)
@@ -455,7 +455,7 @@ The setting is configurable per channel in the UI under the "Dispatch" section o
 
 ---
 
-## Organizations
+## Organizations and Multi-Tenancy
 
 An **organization** groups a set of channels under a shared name — typically a health system or facility. Organizations are a UI and config grouping only; they do not affect message routing or processing.
 
@@ -466,7 +466,7 @@ An **organization** groups a set of channels under a shared name — typically a
 
 The `organization_id` FK on `channels` uses `on_delete: :nilify_all`. Deleting an organization orphans its channels back to ungrouped status — it does not delete channels. This is the correct behavior: organizations are metadata, not owners.
 
-The same FK exists on `users` (also `nilify_all`) as a forward-compatible foundation for future org-scoped authentication. It is not currently enforced in access control.
+The same FK exists on `users` (also `nilify_all`) and drives org-scoped access control: `Joy.Accounts.Scope.org_id/1` returns `user.organization_id` when non-nil, and context query helpers (`apply_org_filter/2` in `Joy.Channels` and `Joy.Organizations`) apply `WHERE organization_id = ?` accordingly. Admin users and nil-org users bypass the filter (sees-all / single-tenant compat). Cross-org `get_*!` calls raise `Ecto.NoResultsError` → 404 rather than 403 to avoid confirming resource existence.
 
 **Dashboard grouping:** The dashboard uses `Enum.group_by(channels, & &1.organization)` to bucket channels by their preloaded org struct, then renders one `<tbody>` per org with an aggregate stat row. Channels with no org appear under an "Ungrouped" header. When all channels are ungrouped (no orgs exist), the table renders as a flat list identical to pre-org behavior.
 
@@ -579,7 +579,7 @@ message_log_entries
 
 users  (phx.gen.auth standard)
   id, email, hashed_password, is_admin, confirmed_at, inserted_at, updated_at
-  organization_id (FK → organizations, nilify_all)  — foundation for future org-scoped auth; inert now
+  organization_id (FK → organizations, nilify_all)  — drives org-scoped access: non-nil = WHERE organization_id filter applied by Scope.org_id/1; admin or nil-org = unscoped
 
 user_tokens  (phx.gen.auth standard)
   id, user_id (FK), token, context, sent_to, inserted_at

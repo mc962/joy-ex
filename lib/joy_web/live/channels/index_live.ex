@@ -7,14 +7,15 @@ defmodule JoyWeb.Channels.IndexLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Joy.PubSub, "channels")
-    channels = Channels.list_channels()
+    scope    = socket.assigns.current_scope
+    channels = Channels.list_channels(scope)
 
     {:ok,
      socket
      |> assign(:page_title, "Channels")
      |> assign(:channels, channels)
      |> assign(:running_ids, running_ids(channels))
-     |> assign(:organizations, Organizations.list_organizations())
+     |> assign(:organizations, Organizations.list_organizations(scope))
      |> assign(:show_modal, false)
      |> assign(:form, nil)
      |> assign(:editing_channel, nil)}
@@ -75,7 +76,7 @@ defmodule JoyWeb.Channels.IndexLive do
               {"channel.created", %{name: ch.name, mllp_port: ch.mllp_port}}
             end
           Joy.AuditLog.log(socket.assigns.current_scope.user, action, "channel", ch.id, ch.name, changes)
-          channels = Channels.list_channels()
+          channels = Channels.list_channels(socket.assigns.current_scope)
           {:noreply,
            socket
            |> assign(:show_modal, false)
@@ -97,7 +98,7 @@ defmodule JoyWeb.Channels.IndexLive do
       if Joy.ChannelManager.channel_running?(channel.id), do: Joy.ChannelManager.stop_channel(channel.id)
       Channels.delete_channel(channel)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.deleted", "channel", channel.id, channel.name)
-      channels = Channels.list_channels()
+      channels = Channels.list_channels(socket.assigns.current_scope)
       {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
@@ -132,14 +133,14 @@ defmodule JoyWeb.Channels.IndexLive do
   @impl true
   # Structural changes (create/delete) need a full refresh including running_ids.
   def handle_info({event, _}, socket) when event in [:channel_created, :channel_deleted] do
-    channels = Channels.list_channels()
+    channels = Channels.list_channels(socket.assigns.current_scope)
     {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
   end
 
   # Config updates refresh channel data but must not overwrite the optimistic running_ids
   # set by start_channel/stop_channel — channel_running? may not reflect reality yet.
   def handle_info({:channel_updated, _}, socket) do
-    {:noreply, assign(socket, :channels, Channels.list_channels())}
+    {:noreply, assign(socket, :channels, Channels.list_channels(socket.assigns.current_scope))}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}

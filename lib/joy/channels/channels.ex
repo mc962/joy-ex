@@ -12,6 +12,7 @@ defmodule Joy.Channels do
 
   import Ecto.Query
   alias Joy.{Repo, Channels.Channel, Channels.TransformStep, Channels.DestinationConfig}
+  alias Joy.Accounts.Scope
 
   @preload_query [:organization,
                   transform_steps: from(t in TransformStep, order_by: [asc: t.position]),
@@ -19,15 +20,16 @@ defmodule Joy.Channels do
 
   # --- Channels ---
 
-  @doc "List all channels with preloaded associations, ordered by name."
-  def list_channels do
+  @doc "List channels with preloaded associations, ordered by name. Pass a scope to filter by org."
+  def list_channels(scope \\ nil) do
     Channel
+    |> apply_org_filter(scope)
     |> order_by([c], asc: c.name)
     |> Repo.all()
     |> Repo.preload(@preload_query)
   end
 
-  @doc "List channels with started: true (to auto-start on boot)."
+  @doc "List channels with started: true (to auto-start on boot). Always unscoped — internal use only."
   def list_started_channels do
     Channel
     |> where([c], c.started == true)
@@ -35,10 +37,12 @@ defmodule Joy.Channels do
     |> Repo.preload(@preload_query)
   end
 
-  @doc "Get a channel by id with preloads. Raises if not found."
-  def get_channel!(id) do
+  @doc "Get a channel by id with preloads. Raises if not found or outside scope."
+  def get_channel!(id, scope \\ nil) do
     Channel
-    |> Repo.get!(id)
+    |> where([c], c.id == ^id)
+    |> apply_org_filter(scope)
+    |> Repo.one!()
     |> Repo.preload(@preload_query)
   end
 
@@ -173,6 +177,13 @@ defmodule Joy.Channels do
   end
 
   # --- Helpers ---
+
+  defp apply_org_filter(query, scope) do
+    case scope && Scope.org_id(scope) do
+      nil    -> query
+      org_id -> where(query, [c], c.organization_id == ^org_id)
+    end
+  end
 
   defp broadcast(event, payload) do
     Phoenix.PubSub.broadcast(Joy.PubSub, "channels", {String.to_atom(event), payload})

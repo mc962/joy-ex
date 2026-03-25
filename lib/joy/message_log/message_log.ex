@@ -16,7 +16,8 @@ defmodule Joy.MessageLog do
   """
 
   import Ecto.Query
-  alias Joy.{Repo, MessageLog.Entry}
+  alias Joy.{Repo, MessageLog.Entry, Channels.Channel}
+  alias Joy.Accounts.Scope
 
   @doc """
   Write a message to the log as :pending. Uses upsert-on-conflict for idempotency
@@ -209,12 +210,20 @@ defmodule Joy.MessageLog do
     |> Repo.all()
   end
 
-  @doc "List all :failed entries across all channels (global DLQ view)."
-  def list_all_failed(opts \\ []) do
-    limit = Keyword.get(opts, :limit, 200)
+  @doc "List all :failed entries across all channels (global DLQ view). Pass a scope to restrict to the user's org."
+  def list_all_failed(scope \\ nil, opts \\ []) do
+    limit  = Keyword.get(opts, :limit, 200)
+    org_id = scope && Scope.org_id(scope)
 
     Entry
     |> where([e], e.status == "failed")
+    |> then(fn q ->
+      if org_id do
+        join(q, :inner, [e], c in Channel, on: c.id == e.channel_id and c.organization_id == ^org_id)
+      else
+        q
+      end
+    end)
     |> order_by([e], desc: e.inserted_at)
     |> limit(^limit)
     |> Repo.all()

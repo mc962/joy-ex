@@ -6,7 +6,7 @@ defmodule JoyWeb.Organizations.ShowLive do
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    org = Organizations.get_organization!(String.to_integer(id)) |> Joy.Repo.preload(:channels)
+    org = Organizations.get_organization!(String.to_integer(id), socket.assigns.current_scope) |> Joy.Repo.preload(:channels)
 
     if connected?(socket), do: Phoenix.PubSub.subscribe(Joy.PubSub, "organizations")
 

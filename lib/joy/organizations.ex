@@ -13,16 +13,23 @@ defmodule Joy.Organizations do
 
   import Ecto.Query
   alias Joy.{Repo, Organizations.Organization}
+  alias Joy.Accounts.Scope
 
-  @doc "List all organizations ordered by name."
-  def list_organizations do
+  @doc "List organizations ordered by name. Pass a scope to restrict to the user's org."
+  def list_organizations(scope \\ nil) do
     Organization
+    |> apply_org_filter(scope)
     |> order_by([o], asc: o.name)
     |> Repo.all()
   end
 
-  @doc "Get an organization by id. Raises if not found."
-  def get_organization!(id), do: Repo.get!(Organization, id)
+  @doc "Get an organization by id. Raises if not found or outside scope."
+  def get_organization!(id, scope \\ nil) do
+    Organization
+    |> where([o], o.id == ^id)
+    |> apply_org_filter(scope)
+    |> Repo.one!()
+  end
 
   @doc "Create an organization. Returns {:ok, org} or {:error, changeset}."
   def create_organization(attrs) do
@@ -52,6 +59,13 @@ defmodule Joy.Organizations do
   end
 
   # --- Helpers ---
+
+  defp apply_org_filter(query, scope) do
+    case scope && Scope.org_id(scope) do
+      nil    -> query
+      org_id -> where(query, [o], o.id == ^org_id)
+    end
+  end
 
   defp broadcast(event, payload) do
     Phoenix.PubSub.broadcast(Joy.PubSub, "organizations", {String.to_atom(event), payload})

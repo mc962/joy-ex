@@ -23,7 +23,7 @@ defmodule JoyWeb.API.V1.MessageLogController do
     responses: [ok: {"Message log entries", "application/json", Schemas.MessageLogList}]
 
   def index(conn, %{"channel_id" => channel_id} = params) do
-    with {:ok, _channel} <- fetch_channel(channel_id) do
+    with {:ok, _channel} <- fetch_channel(channel_id, conn.assigns.current_scope) do
       opts = [
         limit:        min(parse_int(params["limit"], 50), 1000),
         status:       params["status"],
@@ -48,7 +48,7 @@ defmodule JoyWeb.API.V1.MessageLogController do
 
   def retry(conn, %{"channel_id" => channel_id, "message_log_id" => entry_id}) do
     with :ok <- require_admin(conn),
-         {:ok, _channel} <- fetch_channel(channel_id),
+         {:ok, _channel} <- fetch_channel(channel_id, conn.assigns.current_scope),
          {:ok, entry} <- fetch_entry(channel_id, entry_id),
          {:ok, new_entry} <- MessageLog.retry_entry(entry) do
       conn
@@ -57,9 +57,9 @@ defmodule JoyWeb.API.V1.MessageLogController do
     end
   end
 
-  defp fetch_channel(id) do
+  defp fetch_channel(id, scope) do
     try do
-      {:ok, Channels.get_channel!(String.to_integer(id))}
+      {:ok, Channels.get_channel!(String.to_integer(id), scope)}
     rescue
       Ecto.NoResultsError -> {:error, :not_found}
       ArgumentError -> {:error, :not_found}

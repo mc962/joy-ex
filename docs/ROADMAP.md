@@ -1,6 +1,6 @@
 # Joy Roadmap
 
-Items 1–18, 21, and 22 are complete. Items 19 and 20 remain.
+Items 1–22 are complete.
 
 ---
 
@@ -233,19 +233,33 @@ Items 1–18, 21, and 22 are complete. Items 19 and 20 remain.
 
 ---
 
-## 19. Metrics Export ⏳ Planned
+## 19. Metrics Export + Service Accounts ✅ Implemented
 
-**Why:** `Joy.ChannelStats` tracks per-channel received/processed/failed counts in ETS but the data is only visible in the LiveView dashboard. Production deployments need to scrape these metrics into Prometheus or push them to an OpenTelemetry collector for alerting and long-term trending — without polling the web UI.
+**Why:** `Joy.ChannelStats` tracks per-channel received/processed/failed counts in ETS but the data is only visible in the LiveView dashboard. Production deployments need to scrape these metrics into Prometheus — without polling the web UI, and without issuing a personal API token.
 
-**Plan:** Add a `/metrics` endpoint (Plug, outside the authenticated LiveView scope) that emits Prometheus text format: `joy_channel_messages_total{channel, status}` counters and a `joy_channel_queue_depth{channel}` gauge. Wire `Joy.ChannelStats` to also emit telemetry events so an optional OpenTelemetry exporter can consume them without changing the scrape path.
+**What was built:**
+- `GET /api/v1/metrics` — Prometheus text format (`text/plain; version=0.0.4`) behind `:api_auth`; emits per-channel gauges: `joy_channel_running`, `joy_channel_messages_received_today`, `joy_channel_messages_processed_today`, `joy_channel_messages_failed_today`, `joy_channel_session_failures`; no library dependency — manually formatted
+- `service_accounts` table (id, name, inserted_at) and `service_account_tokens` table (service_account_id FK, token_hash, last_used_at, inserted_at); unique index on token_hash; unique index on service_account_id (one active token per SA)
+- `Joy.ServiceAccounts` context: `create_service_account/1`, `rotate_token/1` (delete old token, insert new), `delete_service_account/1`, `verify_token/1`, `touch_last_used/1`; tokens use `"joy_svc_"` prefix + 32 bytes url-safe base64, SHA-256 hashed at rest
+- `Joy.Accounts.Scope`: added `service_account` field and `for_service_account/1` constructor; `admin?/1` returns false for service accounts
+- `JoyWeb.Plugs.ApiAuth`: branches on `"joy_svc_"` prefix — routes to `ServiceAccounts.verify_token` vs `ApiTokens.verify_token`; returns scoped `current_scope` in both cases
+- `/service-accounts` admin-only LiveView: create (name input, plain token shown once via `@revealed_token` assign), rotate (replaces token, shows new plain token once), delete; Service Accounts nav link added
+- All API mutation guards updated to use `Scope.admin?/1` (works for both user tokens and service account tokens)
 
 ---
 
-## 20. Multi-Tenancy / Scoped Auth ⏳ Planned
+## 20. Multi-Tenancy / Scoped Auth ✅ Implemented
 
-**Why:** `organization_id` is already a foreign key on both `users` and `channels`, but it is not enforced in any query — a user belonging to org A can see and modify channels belonging to org B. This is acceptable in a single-tenant deployment but blocks any multi-tenant or white-label use.
+**Why:** `organization_id` is already a foreign key on both `users` and `channels`, but it was not enforced in any query — a user belonging to org A could see channels belonging to org B.
 
-**Plan:** Thread `current_scope` (already carrying `user` and `organization_id`) through all context queries. `Joy.Channels.list_channels/1`, `get_channel!/2`, and all mutations gain a scope argument and add `WHERE organization_id = $n` (or allow nil org to see everything, preserving single-tenant behaviour). Admin users bypass org scoping. Update LiveViews to pass `current_scope` into context calls.
+**What was built:**
+- `Joy.Accounts.Scope.org_id/1` — returns `nil` for admins (sees all) and nil-org users (single-tenant compat), or `user.organization_id` for scoped users; also nil for service accounts (read-all)
+- `Joy.Channels` — `apply_org_filter/2` private helper; `list_channels/1`, `get_channel!/2` accept optional scope and add `WHERE organization_id = ?` when `org_id` is non-nil; `list_started_channels/0` stays unscoped (internal, no user context)
+- `Joy.Organizations` — same pattern: `list_organizations/1`, `get_organization!/2` scoped by org's own `id`
+- `Joy.MessageLog.list_all_failed/2` — when scoped, joins `channels` and filters `c.organization_id = ?`
+- Cross-org `get_*!` raises `Ecto.NoResultsError` → 404 (not 403, avoids confirming resource existence)
+- All LiveViews updated to pass `socket.assigns.current_scope` to context calls (dashboard, channels index/show, orgs index/show, failed messages, message log)
+- All API controllers updated to pass `conn.assigns.current_scope` to context calls; `fetch_channel/2` and `fetch_org/2` helpers accept scope
 
 ---
 
