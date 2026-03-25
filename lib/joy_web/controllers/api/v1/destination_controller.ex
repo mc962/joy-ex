@@ -98,7 +98,7 @@ defmodule JoyWeb.API.V1.DestinationController do
   end
 
   defp require_admin(conn) do
-    if conn.assigns.current_scope.user.is_admin, do: :ok, else: {:error, :unauthorized}
+    if Joy.Accounts.Scope.admin?(conn.assigns.current_scope), do: :ok, else: {:error, :unauthorized}
   end
 
   # config is excluded — it may contain credentials

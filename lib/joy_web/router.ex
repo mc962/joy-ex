@@ -58,6 +58,7 @@ defmodule JoyWeb.Router do
       live "/tools/mllp-client", Tools.MllpClientLive, :index
       live "/tools/sinks", Tools.SinksLive, :index
       live "/tools/retention", RetentionLive, :index
+      live "/service-accounts", ServiceAccountsLive, :index
     end
   end
 
@@ -97,6 +98,7 @@ defmodule JoyWeb.Router do
 
     resources "/organizations", OrganizationController, only: [:index, :show, :create, :update, :delete]
     post "/retention/purge", RetentionController, :purge
+    get "/metrics", MetricsController, :index
   end
 
   if Application.compile_env(:joy, :dev_routes) do

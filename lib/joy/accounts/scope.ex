@@ -18,16 +18,16 @@ defmodule Joy.Accounts.Scope do
 
   alias Joy.Accounts.User
 
-  defstruct user: nil
+  defstruct [:user, :service_account]
 
-  @doc """
-  Creates a scope for the given user.
-
-  Returns nil if no user is given.
-  """
-  def for_user(%User{} = user) do
-    %__MODULE__{user: user}
-  end
-
+  @doc "Creates a scope for the given user. Returns nil if no user is given."
+  def for_user(%User{} = user), do: %__MODULE__{user: user}
   def for_user(nil), do: nil
+
+  @doc "Creates a scope for a service account."
+  def for_service_account(sa), do: %__MODULE__{service_account: sa}
+
+  @doc "Returns true only for human users with is_admin set."
+  def admin?(%__MODULE__{user: %{is_admin: true}}), do: true
+  def admin?(_), do: false
 end

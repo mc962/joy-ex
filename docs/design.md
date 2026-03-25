@@ -811,14 +811,16 @@ Task.start(fn -> Joy.ApiTokens.touch_last_used(token_id) end)
 
 ### Token prefix convention
 
-Tokens begin with `joy_` followed by 43 url-safe base64 characters (`Base.url_encode64(32 bytes)`). The prefix serves two purposes:
+Tokens begin with `joy_` (user tokens) or `joy_svc_` (service account tokens) followed by 43 url-safe base64 characters (`Base.url_encode64(32 bytes)`). The prefix serves two purposes:
 
 1. **Recognizability** — in a config file or environment variable, `joy_abc123...` is obviously a Joy API token. This reduces accidental credential confusion.
 2. **Secret scanning** — tools like GitHub secret scanning or `trufflehog` can be configured with a regex pattern (`joy_[A-Za-z0-9_-]{43}`) to detect committed tokens. A generic random string has no such anchor.
 
+`JoyWeb.Plugs.ApiAuth` branches on the prefix before hashing, routing `joy_svc_` tokens to `Joy.ServiceAccounts.verify_token/1` and all others to `Joy.ApiTokens.verify_token/1`. This keeps service account and user token lookup paths completely separate.
+
 ### Token expiry and the per-user limit
 
-Tokens expire after a configurable TTL (default 90 days, max 365). `verify_token/1` filters on `expires_at > now()`, so expired tokens are silently rejected without any explicit revocation step needed. This is the safety net that prevents indefinite accumulation.
+Tokens expire after a configurable TTL (default 90 days, max 90). `verify_token/1` filters on `expires_at > now()`, so expired tokens are silently rejected without any explicit revocation step needed. This is the safety net that prevents indefinite accumulation.
 
 The per-user limit (10 active tokens) is enforced in `create_token/2`. Before checking the count, all expired tokens for that user are deleted:
 
@@ -837,6 +839,38 @@ Why this design over a background cleanup job: a background job adds scheduling 
 ### Token ownership on user deletion
 
 The `api_tokens` table has `on_delete: :delete_all` on the `user_id` FK. Deleting a user removes all their tokens, immediately invalidating any active integrations using those tokens. This is intentional: tokens derive their authorization from the user (`is_admin`, `organization_id`), so tokens for a deleted user should have no remaining auth surface.
+
+---
+
+## Service Accounts
+
+### Why a separate entity instead of a user flag
+
+A service account is a machine actor — a Prometheus scraper, a CI pipeline, an external integration. It has a fundamentally different lifecycle from a human user:
+
+- **No email, no password, no login** — identity is the token. There is nothing to onboard or offboard.
+- **Independent lifecycle** — a service account's token should not break when an employee leaves or changes their password.
+- **Separate audit trail** — access reviews ask different questions about machine actors ("what is this used for?") vs. human users ("who has access?").
+
+The alternative — an `is_service_account` flag on the `users` table — is an ActiveRecord-style STI (single-table inheritance) pattern. In Elixir/Ecto, separate schemas are idiomatic. Pattern matching on the `joy_svc_` prefix routes cleanly without runtime type checks, and the service account schema has none of the fields that are meaningless for machine actors (`email`, `hashed_password`, `confirmed_at`).
+
+This mirrors how enterprise platforms handle machine identity: Datadog puts service accounts in a separate "Service Accounts" section under Organization Settings, entirely apart from users. AWS, GCP, and Azure all distinguish IAM users from service identities for the same reasons.
+
+### No expiry on service account tokens
+
+User tokens expire in 1–90 days to limit the blast radius of a leaked token. Service account tokens do not expire because:
+
+- The primary consumer is a Prometheus scraper running continuously; a 90-day expiry would require an automated rotation mechanism or the scraper goes dark.
+- Service accounts are admin-managed (not self-service), and the single-token-per-SA model means rotation is always one explicit "Rotate token" click in the UI.
+- The risk profile is different: service account tokens should be stored in a secrets manager (Vault, AWS Secrets Manager, etc.), not in a developer's `.env` file.
+
+The compensating control is that service accounts are **never admin**. A leaked `joy_svc_` token can read channels, organizations, message log, and metrics — but cannot start/stop channels, modify config, or trigger retention purge.
+
+### Single active token per service account
+
+The `service_account_tokens` table has a unique index on `service_account_id`. A service account always has exactly one token. Rotation is atomic: the old token row is deleted and a new one inserted in a single transaction. There is a brief moment of no-token during the transaction, but Postgres serializes this cleanly — any in-flight request that was authenticated before rotation completes its current request, and the next request with the old token will get 401.
+
+This is simpler than multi-token-per-SA (which would require a "current" flag or sorted by `inserted_at`) and matches the expectation that a scraper uses exactly one credential.
 
 ---
 

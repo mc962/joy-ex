@@ -14,6 +14,7 @@ Joy is an HL7 v2.x integration engine: it receives HL7 messages over MLLP (TCP),
 - [Clustering](#clustering)
 - [Web Interface](#web-interface)
 - [REST API](#rest-api)
+- [Service Accounts](#service-accounts)
 - [Dispatch Concurrency](#dispatch-concurrency)
 - [Organizations](#organizations)
 - [Message Log Retention](#message-log-retention)
@@ -354,22 +355,28 @@ Joy exposes a `/api/v1` REST API for programmatic access to channels, organizati
 
 ### Authentication
 
-API requests are authenticated with **Bearer tokens** (`Authorization: Bearer <token>`). Tokens are:
+API requests are authenticated with **Bearer tokens** (`Authorization: Bearer <token>`). Joy has two token types, distinguished by prefix:
 
+**User tokens** (`joy_` prefix):
 - Created via the `/users/settings` page or `POST /api/v1/tokens` (email + password)
-- Shown in plaintext exactly once on creation — only the SHA-256 hash is stored
-- Prefixed with `joy_` for recognizability in configs and logs
 - Valid for 1–90 days (default 90); expired tokens are rejected automatically
 - Capped at 10 active tokens per user; expired tokens are cleaned up on each new creation
 
-The `JoyWeb.Plugs.ApiAuth` plug extracts the header, hashes the token with SHA-256, looks up a non-expired matching row, and assigns `current_scope` identically to the LiveView session model. `last_used_at` is updated asynchronously via `Task.start` to avoid blocking the request.
+**Service account tokens** (`joy_svc_` prefix):
+- Created via `/service-accounts` (admin LiveView); one active token per service account
+- No expiry — intended for Prometheus scrapers and CI pipelines; rotate manually via the UI
+- Never carry admin privileges regardless of who created them
+
+Both token types are shown in plaintext exactly once on creation — only the SHA-256 hash is stored.
+
+`JoyWeb.Plugs.ApiAuth` branches on the prefix before hashing: `joy_svc_` tokens go to `Joy.ServiceAccounts.verify_token/1`, all others to `Joy.ApiTokens.verify_token/1`. Either path assigns `current_scope` and fires an async `Task.start` to update `last_used_at`.
 
 ### Authorization
 
-The same `is_admin` flag used by LiveViews applies to the API:
+`Joy.Accounts.Scope.admin?/1` controls access to mutations:
 
-- **Read-only endpoints** (list/show channels, organizations, message log): open to any authenticated token.
-- **Mutations** (create/update/delete channels and orgs, lifecycle actions, destination changes, retention purge, message retry): require `is_admin: true` on the token's user; return 403 otherwise.
+- **Read-only endpoints** (list/show channels, organizations, message log, metrics): open to any authenticated token (user or service account).
+- **Mutations** (create/update/delete channels and orgs, lifecycle actions, destination changes, retention purge, message retry): require `Scope.admin?(scope)` to return true. This is true only for human users with `is_admin: true`. Service accounts always return false and receive 403.
 
 ### Routes
 
@@ -388,10 +395,12 @@ The same `is_admin` flag used by LiveViews applies to the API:
 | `/api/v1/organizations` | GET, POST | List orgs; create org |
 | `/api/v1/organizations/:id` | GET, PUT, DELETE | Get/update/delete an org |
 | `/api/v1/retention/purge` | POST | Trigger a synchronous retention purge (admin) |
+| `/api/v1/metrics` | GET | Prometheus text format — per-channel throughput and running state |
 | `/api/v1/tokens` | POST | Create a Bearer token (unauthenticated — accepts email + password) |
 | `/api/v1/tokens/:id` | DELETE | Revoke one of the authenticated user's tokens |
 | `/api/v1/openapi.json` | GET | OpenAPI 3.0 spec (unauthenticated) |
 | `/api/docs` | GET | Scalar — interactive API documentation (unauthenticated) |
+| `/service-accounts` | GET | Admin LiveView — manage service accounts and rotate tokens |
 
 ### OpenAPI / Scalar
 
@@ -415,6 +424,20 @@ Two fields are never included in API responses:
 
 - `channels.tls_key_pem` — private key material
 - `destination_configs.config` — may contain adapter credentials (API keys, passwords, connection strings)
+
+---
+
+## Service Accounts
+
+Service accounts are named machine actors used for API access by non-human clients (Prometheus scrapers, CI pipelines, external integrations). They are managed separately from users — there is no email, no password, and no browser login.
+
+Each service account has exactly one active token (`joy_svc_` prefix, no expiry). Rotating a token deletes the old row and inserts a new one atomically. The new token is shown once in the admin UI and never stored in plaintext.
+
+Service accounts are **never admin**. `Joy.Accounts.Scope.admin?/1` returns `false` for any service account scope regardless of how it was created. They can read channels, organizations, message log, and metrics — but cannot mutate anything.
+
+**Admin UI:** `/service-accounts` (LiveView, admin-only) — create, rotate token, delete.
+
+**Auth flow:** `ApiAuth` detects the `joy_svc_` prefix, calls `Joy.ServiceAccounts.verify_token/1`, and assigns `%Scope{service_account: sa}`. The remainder of the request pipeline is identical to user token requests.
 
 ---
 
@@ -569,6 +592,18 @@ api_tokens
   inserted_at (utc_datetime)         — no updated_at; tokens are immutable after creation
   INDEX user_id
   Max 10 active tokens per user; expired tokens are deleted at create_token time before the limit is checked
+
+service_accounts
+  id, name (string), inserted_at
+  Admin-managed machine actors; no email, no password, no login
+
+service_account_tokens
+  id, service_account_id (FK → service_accounts, delete_all)
+  token_hash (string, unique index)  — SHA-256 hex; same hashing scheme as api_tokens
+  last_used_at (utc_datetime)        — updated asynchronously on each authenticated request
+  inserted_at (utc_datetime)
+  UNIQUE INDEX service_account_id   — enforces one active token per service account
+  No expiry; rotate manually via the /service-accounts admin UI
 
 retention_settings  (single row — created on first access)
   id, retention_days (default 90), schedule_enabled, schedule_hour (UTC, default 2)

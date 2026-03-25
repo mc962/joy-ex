@@ -148,7 +148,7 @@ defmodule JoyWeb.API.V1.ChannelController do
   end
 
   defp require_admin(conn) do
-    if conn.assigns.current_scope.user.is_admin, do: :ok, else: {:error, :unauthorized}
+    if Joy.Accounts.Scope.admin?(conn.assigns.current_scope), do: :ok, else: {:error, :unauthorized}
   end
 
   defp serialize(channel) do
