@@ -6,11 +6,12 @@
 # Required env vars at runtime — see docker-compose.yml for full list.
 
 ARG ELIXIR_VERSION=1.18.4
-ARG OTP_VERSION=26.2.5.17
-ARG DEBIAN_VERSION=trixie-20250203
+ARG OTP_VERSION=27.3.1
+ARG DEBIAN_DISTRO=ubuntu
+ARG DEBIAN_VERSION=noble-20260217
 
-ARG BUILDER_IMAGE="docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
-ARG RUNNER_IMAGE="docker.io/debian:${DEBIAN_VERSION}-slim"                                                                 
+ARG BUILDER_IMAGE="docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-${DEBIAN_DISTRO}-${DEBIAN_VERSION}"
+ARG RUNNER_IMAGE="docker.io/ubuntu:${DEBIAN_VERSION}"                                                                 
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build
