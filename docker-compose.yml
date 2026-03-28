@@ -34,25 +34,21 @@
 #   ENCRYPTION_KEY:   :crypto.strong_rand_bytes(32) |> Base.encode64() |> IO.puts  (in iex)
 #   RELEASE_COOKIE:   mix phx.gen.secret 32
 
-x-joy-env: &joy-env
-  DATABASE_URL: "ecto://joy:joy@postgres/joy_prod"
-  REPLICA_DATABASE_URL: "ecto://joy:joy@postgres_replica/joy_prod"
-  SECRET_KEY_BASE: "REPLACE_WITH_mix_phx_gen_secret_OUTPUT"
-  ENCRYPTION_KEY: "REPLACE_WITH_32_BYTE_BASE64_KEY="
-  RELEASE_COOKIE: "REPLACE_WITH_RANDOM_SECRET"
-  PHX_HOST: "localhost"
-  PHX_SERVER: "true"
-  # dns_cluster will resolve "joy" → both container IPs via Docker network aliases below
-  DNS_CLUSTER_QUERY: "joy"
-  # Pool size per node — total DB connections = (POOL_SIZE + REPLICA_POOL_SIZE) × num_nodes
-  POOL_SIZE: "5"
-  REPLICA_POOL_SIZE: "3"
+x-joy-base: &joy-base
+  build: .
+  env_file: .env
+  environment:
+    PHX_HOST: "localhost"
+    PHX_SERVER: "true"
+    # dns_cluster will resolve "joy" → both container IPs via Docker network aliases below
+    DNS_CLUSTER_QUERY: "joy"
+    # Pool size per node — total DB connections = (POOL_SIZE + REPLICA_POOL_SIZE) × num_nodes
+    POOL_SIZE: "5"
+    REPLICA_POOL_SIZE: "3"
 
 services:
   joy1:
-    build: .
-    environment:
-      <<: *joy-env
+    <<: *joy-base
     ports:
       - "4000:4000"      # Web UI for node 1 (direct access)
       - "2575:2575"      # MLLP — routed via HAProxy (see haproxy service note below)
@@ -67,9 +63,7 @@ services:
           - joy            # All nodes answer to "joy" DNS → multi-A record discovery
 
   joy2:
-    build: .
-    environment:
-      <<: *joy-env
+    <<: *joy-base
     ports:
       - "4001:4000"      # Web UI for node 2 (direct access)
       - "2576:2575"      # MLLP — different host port because joy1 already owns 2575 on this host
@@ -85,9 +79,7 @@ services:
 
   # Comment out this block to test a two-node cluster instead.
   joy3:
-    build: .
-    environment:
-      <<: *joy-env
+    <<: *joy-base
     ports:
       - "4002:4000"      # Web UI for node 3 (direct access)
       - "2577:2575"      # MLLP — different host port because joy1/joy2 own 2575/2576
@@ -140,10 +132,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: joy
-      POSTGRES_PASSWORD: joy
-      POSTGRES_DB: joy_prod
+    env_file: .env
     # Enable WAL streaming replication
     command: >
       postgres
@@ -166,10 +155,8 @@ services:
   # To verify replication: docker compose exec postgres_replica psql -U joy -d joy_prod -c "SELECT * FROM pg_stat_wal_receiver;"
   postgres_replica:
     image: postgres:16-alpine
+    env_file: .env
     environment:
-      POSTGRES_USER: joy
-      POSTGRES_PASSWORD: joy
-      POSTGRES_DB: joy_prod
       PGDATA: /var/lib/postgresql/data
       PRIMARY_HOST: postgres
     entrypoint: ["bash", "/usr/local/bin/replica-entrypoint.sh"]
