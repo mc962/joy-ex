@@ -5,7 +5,8 @@ defmodule Joy.Application do
   Supervision tree (all :one_for_one at the top level — each child is independent):
 
     JoyWeb.Telemetry          — Phoenix metrics
-    Joy.Repo                  — Ecto database connection pool
+    Joy.Repo                  — Ecto primary database connection pool
+    Joy.Repo.Replica          — Ecto read replica pool (only when REPLICA_DATABASE_URL is set)
     DNSCluster                — distributed node discovery (connects Erlang nodes)
     Phoenix.PubSub            — real-time pub/sub for LiveView dashboard updates (pg adapter, cluster-aware)
     Joy.ChannelRegistry       — Horde.Registry: distributed registry of channel supervisor + pipeline PIDs
@@ -35,9 +36,14 @@ defmodule Joy.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      JoyWeb.Telemetry,
-      Joy.Repo,
+    repo_children =
+      [Joy.Repo] ++
+        if(Application.get_env(:joy, :replica_enabled), do: [Joy.Repo.Replica], else: [])
+
+    children =
+      [JoyWeb.Telemetry] ++
+      repo_children ++
+      [
       {DNSCluster, query: Application.get_env(:joy, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Joy.PubSub},
 

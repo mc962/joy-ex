@@ -10,14 +10,24 @@
 #
 # To test a two-node cluster, comment out the joy3 service block below.
 #
-# Web UI:
+# Topology (mirrors a typical AWS deployment):
+#   HAProxy    → NLB analog: TCP health-check routing for MLLP (port 2575)
+#   Caddy      → ALB analog: HTTP/HTTPS reverse proxy for the admin UI
+#   joy1/2/3   → EC2/ECS nodes
+#   postgres   → RDS primary
+#   postgres_replica → RDS read replica
+#
+# Web UI (direct node access for debugging):
 #   Node 1: http://localhost:4000
-#   Node 2: http://localhost:4001   (same app, different node — shows Horde failover)
+#   Node 2: http://localhost:4001
 #   Node 3: http://localhost:4002
 #
-# MLLP ports: expose per-channel MLLP ports from ALL nodes here.
-#   In production, an NLB health-checks each port on each node and only routes
-#   to the node where that channel is currently running (Horde ensures exactly one).
+# MLLP: send to HAProxy at localhost:2575 — it routes to whichever node is
+#   running the channel. Kill a node mid-test to see Horde failover + HAProxy
+#   reroute within ~2-4s. Watch the backend health at http://localhost:8404/stats
+#
+# To add a new MLLP channel port: add a frontend+backend pair to docker/haproxy.cfg
+#   and expose the port from the haproxy service below.
 #
 # Secrets: copy this block to a .env file and fill in real values.
 #   SECRET_KEY_BASE:  mix phx.gen.secret
@@ -26,6 +36,7 @@
 
 x-joy-env: &joy-env
   DATABASE_URL: "ecto://joy:joy@postgres/joy_prod"
+  REPLICA_DATABASE_URL: "ecto://joy:joy@postgres_replica/joy_prod"
   SECRET_KEY_BASE: "REPLACE_WITH_mix_phx_gen_secret_OUTPUT"
   ENCRYPTION_KEY: "REPLACE_WITH_32_BYTE_BASE64_KEY="
   RELEASE_COOKIE: "REPLACE_WITH_RANDOM_SECRET"
@@ -33,8 +44,9 @@ x-joy-env: &joy-env
   PHX_SERVER: "true"
   # dns_cluster will resolve "joy" → both container IPs via Docker network aliases below
   DNS_CLUSTER_QUERY: "joy"
-  # Pool size per node — total DB connections = POOL_SIZE × num_nodes
+  # Pool size per node — total DB connections = (POOL_SIZE + REPLICA_POOL_SIZE) × num_nodes
   POOL_SIZE: "5"
+  REPLICA_POOL_SIZE: "3"
 
 services:
   joy1:
@@ -42,12 +54,13 @@ services:
     environment:
       <<: *joy-env
     ports:
-      - "4000:4000"      # Web UI for node 1
-      # Expose MLLP ports here as channels are added, e.g.:
-      # - "2575:2575"
+      - "4000:4000"      # Web UI for node 1 (direct access)
+      - "2575:2575"      # MLLP — routed via HAProxy (see haproxy service note below)
     depends_on:
       postgres:
         condition: service_healthy
+      postgres_replica:
+        condition: service_started
     networks:
       joy_net:
         aliases:
@@ -58,11 +71,13 @@ services:
     environment:
       <<: *joy-env
     ports:
-      - "4001:4000"      # Web UI for node 2 (different host port)
-      # - "2576:2575"    # Same MLLP port on different host port for testing
+      - "4001:4000"      # Web UI for node 2 (direct access)
+      - "2576:2575"      # MLLP — different host port because joy1 already owns 2575 on this host
     depends_on:
       postgres:
         condition: service_healthy
+      postgres_replica:
+        condition: service_started
     networks:
       joy_net:
         aliases:
@@ -74,15 +89,54 @@ services:
     environment:
       <<: *joy-env
     ports:
-      - "4002:4000"      # Web UI for node 3 (different host port)
-      # - "2577:2575"    # Same MLLP port on different host port for testing
+      - "4002:4000"      # Web UI for node 3 (direct access)
+      - "2577:2575"      # MLLP — different host port because joy1/joy2 own 2575/2576
     depends_on:
       postgres:
         condition: service_healthy
+      postgres_replica:
+        condition: service_started
     networks:
       joy_net:
         aliases:
           - joy            # All nodes answer to "joy" DNS → multi-A record discovery
+
+  # ---------------------------------------------------------------------------
+  # HAProxy — NLB analog for MLLP TCP load balancing.
+  #
+  # CURRENTLY COMMENTED OUT: replaced by a dedicated HAProxy LXC in the homelab
+  # (192.168.1.200). That host runs the full `haproxy` Ansible role with active
+  # TCP health checks and Let's Encrypt TLS termination for mllp.florence.place.
+  #
+  # Why different host ports (2575/2576/2577) on the joy nodes above?
+  # HAProxy needs to address each Joy node independently to health-check them.
+  # Since all three nodes run on the same host (kita, 192.168.1.99), they can't
+  # all bind to the same host port — so each gets a unique one mapping to the
+  # same container port 2575. The active Horde node accepts; the others refuse.
+  # HAProxy sees this and routes only to the live node (balance first + tcp-check).
+  #
+  # Future: when kita gets an ethernet interface, switch to Docker macvlan so each
+  # joy container gets its own LAN IP (192.168.1.201-203) and all use port 2575
+  # uniformly. macvlan doesn't work on WiFi (wlp9s0) because the AP only forwards
+  # traffic to one MAC address per client.
+  #
+  # To run locally without the homelab HAProxy: uncomment this block and revert
+  # the joy port mappings to not expose 2575/2576/2577 on the host.
+  #
+  # haproxy:
+  #   image: haproxy:3-alpine
+  #   ports:
+  #     - "2575:2575"      # MLLP (add more ports here as channels are added)
+  #     - "8404:8404"      # HAProxy stats UI
+  #   volumes:
+  #     - ./docker/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+  #   depends_on:
+  #     - joy1
+  #     - joy2
+  #     - joy3
+  #   networks:
+  #     - joy_net
+  # ---------------------------------------------------------------------------
 
   postgres:
     image: postgres:16-alpine
@@ -90,13 +144,40 @@ services:
       POSTGRES_USER: joy
       POSTGRES_PASSWORD: joy
       POSTGRES_DB: joy_prod
+    # Enable WAL streaming replication
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=5
+      -c wal_keep_size=64
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/primary-init.sh:/docker-entrypoint-initdb.d/01-replication.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U joy -d joy_prod"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - joy_net
+
+  # Streaming replica — clones primary on first start via pg_basebackup.
+  # Remove REPLICA_DATABASE_URL from x-joy-env to disable replica routing in the app.
+  # To verify replication: docker compose exec postgres_replica psql -U joy -d joy_prod -c "SELECT * FROM pg_stat_wal_receiver;"
+  postgres_replica:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: joy
+      POSTGRES_PASSWORD: joy
+      POSTGRES_DB: joy_prod
+      PGDATA: /var/lib/postgresql/data
+      PRIMARY_HOST: postgres
+    entrypoint: ["bash", "/usr/local/bin/replica-entrypoint.sh"]
+    volumes:
+      - ./docker/replica-entrypoint.sh:/usr/local/bin/replica-entrypoint.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - joy_net
 

@@ -22,11 +22,12 @@ defmodule Joy.Channels do
 
   @doc "List channels with preloaded associations, ordered by name. Pass a scope to filter by org."
   def list_channels(scope \\ nil) do
+    replica = Repo.replica()
     Channel
     |> apply_org_filter(scope)
     |> order_by([c], asc: c.name)
-    |> Repo.all()
-    |> Repo.preload(@preload_query)
+    |> replica.all()
+    |> replica.preload(@preload_query)
   end
 
   @doc "List channels with started: true (to auto-start on boot). Always unscoped — internal use only."

@@ -20,7 +20,7 @@ defmodule Joy.Organizations do
     Organization
     |> apply_org_filter(scope)
     |> order_by([o], asc: o.name)
-    |> Repo.all()
+    |> Repo.replica().all()
   end
 
   @doc "Get an organization by id. Raises if not found or outside scope."
@@ -28,7 +28,7 @@ defmodule Joy.Organizations do
     Organization
     |> where([o], o.id == ^id)
     |> apply_org_filter(scope)
-    |> Repo.one!()
+    |> Repo.replica().one!()
   end
 
   @doc "Create an organization. Returns {:ok, org} or {:error, changeset}."

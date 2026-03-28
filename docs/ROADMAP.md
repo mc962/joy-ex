@@ -164,3 +164,47 @@
 - `mllp_forward` adapter extracts MSA.1 from the received ACK frame and returns it as part of the delivery result
 - `Joy.Channel.Pipeline` stores the code when marking the entry processed or failed
 - Message detail panel displays ACK code alongside transformed HL7
+
+---
+
+## 34. OAuth 2.0 / OIDC Authentication ⏳ Planned
+
+**Why:** The existing password-based auth (phx.gen.auth) is not how most healthcare IT departments manage access. Enterprise environments authenticate via SSO — Azure AD, Okta, Google Workspace, Keycloak. Supporting OIDC means Joy plugs into whatever IdP the organization already operates, with no local password management, no shared credentials, and MFA inherited from the IdP. It is the expected baseline for any enterprise-deployed integration engine.
+
+**Plan:**
+- `ueberauth` + `ueberauth_oidcc` for the OIDC strategy (wraps the Erlang `oidcc` library, maintained by the Erlang Ecosystem Foundation — more spec-compliant than older Ueberauth OIDC strategies); individual provider strategies for Google, GitHub, Azure AD / Entra ID as needed
+- On successful OIDC callback: look up or provision a local `users` record keyed on the IdP's `sub` claim; existing role/org assignments apply unchanged
+- Admin UI: enabled providers list with client ID/secret config (stored encrypted); per-provider toggle
+- Local password auth remains available — can be disabled org-wide for environments that require SSO-only
+- No schema changes to the authorization model; OIDC is purely an authentication path into the existing `Scope`-based system
+- Ueberauth success → phx.gen.auth database session (same session system as password auth, different entry point); JWT tokens for API use only (item 36)
+
+---
+
+## 35. LDAP / Active Directory Authentication ⏳ Planned
+
+**Why:** Many hospital networks still authenticate everything against Active Directory or OpenLDAP. OIDC requires a modern IdP layer in front of AD (ADFS, Azure AD Connect, etc.) that not all smaller facilities have. Native LDAP bind lets Joy authenticate directly against the directory every organization already has, with no middleware. Group membership in AD maps naturally to Joy's admin/read-only roles.
+
+**Plan:**
+- `exldap` (or `eldap` from OTP stdlib) for LDAP bind and search
+- Config: `ldap_host`, `ldap_port`, `ldap_base_dn`, `ldap_bind_dn` + password (stored encrypted), `ldap_user_filter`, optional `ldap_admin_group_dn` and `ldap_readonly_group_dn`
+- Auth flow: bind with service account → search for user DN by username → bind again as the user with their password to verify credentials → check group membership for role assignment
+- On success: look up or provision a local `users` record; role derived from group membership, overridable by a local admin
+- Admin UI: LDAP config form with a "Test connection" button that runs a search with the service account credentials
+- Existing password auth remains available as fallback during LDAP migration
+
+---
+
+## 36. Guardian JWT API Tokens ⏳ Planned
+
+**Why:** The current service account tokens (`joy_svc_*`) are opaque random strings verified by a DB lookup on every API request. Replacing them with Guardian-issued JWTs makes verification stateless — no roundtrip to the DB per request — and embeds claims (`org_id`, `role`, `type`) directly in the token so the request handler has full context without additional queries. This also gives external systems a standard Bearer JWT they can introspect rather than an opaque string.
+
+**Why not JWT for web sessions:** JWTs cannot be immediately revoked without a server-side blocklist. The existing phx.gen.auth database-backed sessions revoke instantly on logout, which is the correct behavior for browser sessions. Guardian is used for API tokens only; web sessions remain database-backed. Ueberauth (items 34/35) authenticates users via OAuth/LDAP and then lands them in the same phx.gen.auth session — no JWT involved in the browser flow.
+
+**Plan:**
+- `joken` for JWT signing and verification (lighter than Guardian; does exactly what's needed without the framework overhead — no subjects, permissions, or plug abstractions required)
+- JWT claims: `sub` (service account ID), `typ` (`"service_account"`), `org_id`, `role`, `jti` (UUID, for revocation)
+- Replace opaque `joy_svc_*` token generation with `Joken.generate_and_sign/3`; token displayed once at creation, not stored — only the `jti` is persisted for revocation tracking
+- API auth plug: verify JWT signature + check `jti` not in revocation set → build `Scope` from claims (no DB lookup for valid non-revoked tokens)
+- Token revocation: small `revoked_tokens` table (`jti`, `revoked_at`); pruned automatically when `exp` passes
+- Admin UI: service account token management updated to show JWT issuance; existing list/revoke UI unchanged in appearance

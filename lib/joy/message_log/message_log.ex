@@ -207,7 +207,7 @@ defmodule Joy.MessageLog do
     end)
     |> order_by([e], desc: e.inserted_at)
     |> limit(^limit)
-    |> Repo.all()
+    |> Repo.replica().all()
   end
 
   @doc "List all :failed entries across all channels (global DLQ view). Pass a scope to restrict to the user's org."
@@ -226,12 +226,12 @@ defmodule Joy.MessageLog do
     end)
     |> order_by([e], desc: e.inserted_at)
     |> limit(^limit)
-    |> Repo.all()
+    |> Repo.replica().all()
   end
 
   @doc "Count all :failed entries across all channels."
   def count_all_failed do
-    Repo.one(from e in Entry, where: e.status == "failed", select: count(e.id)) || 0
+    Repo.replica().one(from e in Entry, where: e.status == "failed", select: count(e.id)) || 0
   end
 
   @doc "Get a single entry by id. Raises if not found."

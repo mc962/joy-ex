@@ -22,7 +22,8 @@ config :joy, :scopes,
 
 config :joy,
   ecto_repos: [Joy.Repo],
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  replica_enabled: false
 
 # Configure the endpoint
 config :joy, JoyWeb.Endpoint,
