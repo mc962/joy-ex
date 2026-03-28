@@ -37,7 +37,6 @@
 x-joy-base: &joy-base
   build: .
   env_file: .env
-  userns_mode: "keep-id:uid=1001,gid=1001"
   environment:
     PHX_HOST: "localhost"
     PHX_SERVER: "true"
@@ -48,22 +47,14 @@ x-joy-base: &joy-base
     REPLICA_POOL_SIZE: "3"
 
 services:
-  migrate:
-    <<: *joy-base
-    command: ["/app/bin/migrate"]
-    restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   joy1:
     <<: *joy-base
     ports:
       - "4000:4000"      # Web UI for node 1 (direct access)
       - "2575:2575"      # MLLP — routed via HAProxy (see haproxy service note below)
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       postgres_replica:
         condition: service_started
     networks:
@@ -77,8 +68,8 @@ services:
       - "4001:4000"      # Web UI for node 2 (direct access)
       - "2576:2575"      # MLLP — different host port because joy1 already owns 2575 on this host
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       postgres_replica:
         condition: service_started
     networks:
@@ -93,8 +84,8 @@ services:
       - "4002:4000"      # Web UI for node 3 (direct access)
       - "2577:2575"      # MLLP — different host port because joy1/joy2 own 2575/2576
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       postgres_replica:
         condition: service_started
     networks:
