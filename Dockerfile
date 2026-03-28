@@ -61,12 +61,13 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 ENV LANG="en_US.UTF-8" LANGUAGE="en_US:en" LC_ALL="en_US.UTF-8"
 
 WORKDIR /app
-RUN chown nobody /app
+RUN groupadd -g 1000 joy && useradd -u 1000 -g joy -s /bin/sh joy
+RUN chown joy /app
 
 ENV MIX_ENV="prod"
-COPY --from=build --chown=nobody:root /app/_build/${MIX_ENV}/rel/joy ./
+COPY --from=build --chown=joy:joy /app/_build/${MIX_ENV}/rel/joy ./
 
-USER nobody
+USER joy
 
 # HTTP/HTTPS
 EXPOSE 4000
