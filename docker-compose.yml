@@ -37,6 +37,7 @@
 x-joy-base: &joy-base
   build: .
   env_file: .env
+  userns_mode: "keep-id:uid=1001,gid=1001"
   environment:
     PHX_HOST: "localhost"
     PHX_SERVER: "true"
