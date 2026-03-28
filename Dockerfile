@@ -61,7 +61,7 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 ENV LANG="en_US.UTF-8" LANGUAGE="en_US:en" LC_ALL="en_US.UTF-8"
 
 WORKDIR /app
-RUN groupadd -g 1000 joy && useradd -u 1000 -g joy -s /bin/sh joy
+RUN groupadd -g 1001 joy && useradd -u 1001 -g joy -s /bin/sh joy
 RUN chown joy /app
 
 ENV MIX_ENV="prod"
