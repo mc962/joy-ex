@@ -9,8 +9,8 @@ ARG ELIXIR_VERSION=1.18.4
 ARG OTP_VERSION=26.2.5.17
 ARG DEBIAN_VERSION=trixie-20250203
 
-ARG BUILDER_IMAGE="hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
-ARG RUNNER_IMAGE="debian:${DEBIAN_VERSION}-slim"
+ARG BUILDER_IMAGE="docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
+ARG RUNNER_IMAGE="docker.io/debian:${DEBIAN_VERSION}-slim"                                                                 
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build
