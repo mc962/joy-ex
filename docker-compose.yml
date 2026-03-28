@@ -134,7 +134,7 @@ services:
     image: docker.io/library/postgres:16-alpine
     env_file: .env
     ports:
-      - "5432:5432"
+      - "5532:5432"
     # Enable WAL streaming replication
     command: >
       postgres
@@ -158,6 +158,8 @@ services:
   postgres_replica:
     image: docker.io/library/postgres:16-alpine
     env_file: .env
+    ports:
+      - "5533:5432"
     environment:
       PGDATA: /var/lib/postgresql/data
       PRIMARY_HOST: postgres
