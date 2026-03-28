@@ -131,7 +131,7 @@ services:
   # ---------------------------------------------------------------------------
 
   postgres:
-    image: postgres:16-alpine
+    image: docker.io/library/postgres:16-alpine
     env_file: .env
     # Enable WAL streaming replication
     command: >
@@ -154,7 +154,7 @@ services:
   # Remove REPLICA_DATABASE_URL from x-joy-env to disable replica routing in the app.
   # To verify replication: docker compose exec postgres_replica psql -U joy -d joy_prod -c "SELECT * FROM pg_stat_wal_receiver;"
   postgres_replica:
-    image: postgres:16-alpine
+    image: docker.io/library/postgres:16-alpine
     env_file: .env
     environment:
       PGDATA: /var/lib/postgresql/data
