@@ -46,7 +46,7 @@ RUN mix assets.deploy
 COPY config/runtime.exs config/
 COPY rel rel
 
-RUN mix release
+RUN mix release && chmod +x _build/${MIX_ENV}/rel/joy/bin/*
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — minimal Debian image, no build tools
