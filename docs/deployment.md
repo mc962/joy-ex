@@ -212,7 +212,7 @@ For a static set of VMs (dedicated servers or fixed EC2 instances). The cluster 
 
 **Deregistering a node:** Before taking a node offline, remove its A record from Route 53 first. This allows the remaining nodes to stop routing to it before it goes down. If you remove the record after the node is already down, the remaining nodes will briefly log connection errors until the TTL expires.
 
-**Stable named nodes (homelab / florence.place):** If your servers have permanent, meaningful hostnames, see the commented-out `libcluster` block in `config/runtime.exs` for an alternative approach that gives you more readable node names (`joy@joy-1.florence.place` instead of `joy@10.0.1.10`).
+**Stable named nodes (homelab / example.com):** If your servers have permanent, meaningful hostnames, see the commented-out `libcluster` block in `config/runtime.exs` for an alternative approach that gives you more readable node names (`joy@joy-1.example.com` instead of `joy@10.0.1.10`).
 
 ---
 

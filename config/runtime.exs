@@ -88,16 +88,16 @@ if config_env() == :prod do
   #   4. Set RELEASE_NODE in rel/env.sh.eex to a fixed name instead of the IP-based one, e.g.:
   #        export RELEASE_NODE="joy@$(hostname -f)"   # uses the machine's FQDN
   #
-  # Example for a 3-node homelab cluster at florence.place:
+  # Example for a 3-node homelab cluster at example.com:
   #
   # topologies = [
   #   joy: [
   #     strategy: Cluster.Strategy.Epmd,
   #     config: [
   #       hosts: [
-  #         :"joy@joy-1.florence.place",
-  #         :"joy@joy-2.florence.place",
-  #         :"joy@joy-3.florence.place"
+  #         :"joy@joy-1.example.com",
+  #         :"joy@joy-2.example.com,
+  #         :"joy@joy-3.example.com"
   #       ]
   #     ]
   #   ]
@@ -154,5 +154,6 @@ if config_env() == :prod do
     username: System.get_env("SMTP_USER") || raise("SMTP_USER is missing"),
     password: System.get_env("SMTP_PASSWORD") || raise("SMTP_PASSWORD is missing"),
     tls: :always,
-    auth: :always
+    auth: :always,
+    hostname: System.get_env("SMTP_HOSTNAME", "localhost")
 end

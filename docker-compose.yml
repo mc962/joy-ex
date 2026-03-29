@@ -107,7 +107,7 @@ services:
   #
   # CURRENTLY COMMENTED OUT: replaced by a dedicated HAProxy LXC in the homelab
   # (192.168.1.200). That host runs the full `haproxy` Ansible role with active
-  # TCP health checks and Let's Encrypt TLS termination for mllp.florence.place.
+  # TCP health checks and Let's Encrypt TLS termination for mllp.example.com.
   #
   # Why different host ports (2575/2576/2577) on the joy nodes above?
   # HAProxy needs to address each Joy node independently to health-check them.
