@@ -1,6 +1,9 @@
 defmodule JoyWeb.RetentionLive do
   @moduledoc "Message log retention settings and manual purge controls."
   use JoyWeb, :live_view
+
+  on_mount {JoyWeb.AdminAuth, :default}
+
   alias Joy.Retention
   alias Joy.Retention.Settings
 

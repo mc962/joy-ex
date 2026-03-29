@@ -1,6 +1,9 @@
 defmodule JoyWeb.AuditLive do
   @moduledoc "Admin-only audit log viewer with resource type and date range filtering."
   use JoyWeb, :live_view
+
+  on_mount {JoyWeb.AdminAuth, :default}
+
   alias Joy.Retention
 
   @resource_types [

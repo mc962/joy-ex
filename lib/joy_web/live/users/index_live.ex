@@ -2,6 +2,8 @@ defmodule JoyWeb.Users.IndexLive do
   @moduledoc "Admin-only user management: list users, promote/demote admin."
   use JoyWeb, :live_view
 
+  on_mount {JoyWeb.AdminAuth, :default}
+
   alias Joy.Accounts
 
   @impl true

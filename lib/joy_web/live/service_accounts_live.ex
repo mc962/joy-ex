@@ -2,6 +2,8 @@ defmodule JoyWeb.ServiceAccountsLive do
   @moduledoc "Admin-only service account management: create, rotate token, delete."
   use JoyWeb, :live_view
 
+  on_mount {JoyWeb.AdminAuth, :default}
+
   alias Joy.ServiceAccounts
 
   @impl true

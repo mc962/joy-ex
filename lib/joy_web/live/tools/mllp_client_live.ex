@@ -2,6 +2,8 @@ defmodule JoyWeb.Tools.MllpClientLive do
   @moduledoc "MLLP test client: one-off Send mode and concurrent Stress Test mode."
   use JoyWeb, :live_view
 
+  on_mount {JoyWeb.AdminAuth, :default}
+
   @stress_message_types %{"adt_a01" => :adt_a01, "oru_r01" => :oru_r01, "orm_o01" => :orm_o01}
 
   defp build_sample_messages do

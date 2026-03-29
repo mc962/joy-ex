@@ -2,6 +2,8 @@ defmodule JoyWeb.Tools.SinksLive do
   @moduledoc "Real-time message sink inspector for testing destinations."
   use JoyWeb, :live_view
 
+  on_mount {JoyWeb.AdminAuth, :default}
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do

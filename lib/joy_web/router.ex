@@ -49,10 +49,7 @@ defmodule JoyWeb.Router do
       live "/organizations/new", Organizations.IndexLive, :new
       live "/organizations/:id", Organizations.ShowLive, :show
       live "/organizations/:id/edit", Organizations.ShowLive, :edit
-    end
-
-    live_session :admin,
-      on_mount: [{JoyWeb.UserAuth, :require_authenticated}, JoyWeb.AdminAuth] do
+      # Admin routes — each LiveView enforces AdminAuth via on_mount
       live "/users", Users.IndexLive, :index
       live "/audit", AuditLive, :index
       live "/tools/mllp-client", Tools.MllpClientLive, :index

@@ -153,13 +153,21 @@ if config_env() == :prod do
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.
 
+  smtp_host = System.get_env("SMTP_HOST") || raise("SMTP_HOST is missing")
+
   config :joy, Joy.Mailer,
     adapter: Swoosh.Adapters.SMTP,
-    relay: System.get_env("SMTP_HOST") || raise("SMTP_HOST is missing"),
+    relay: smtp_host,
     port: String.to_integer(System.get_env("SMTP_PORT", "587")),
     username: System.get_env("SMTP_USER") || raise("SMTP_USER is missing"),
     password: System.get_env("SMTP_PASSWORD") || raise("SMTP_PASSWORD is missing"),
     tls: :always,
     auth: :always,
-    hostname: System.get_env("SMTP_HOSTNAME", "localhost")
+    hostname: System.get_env("SMTP_HOSTNAME", "localhost"),
+    tls_options: [
+      verify: :verify_peer,
+      cacerts: :public_key.cacerts_get(),
+      server_name_indication: String.to_charlist(smtp_host),
+      depth: 4
+    ]
 end
