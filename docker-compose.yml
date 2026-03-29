@@ -40,7 +40,6 @@ x-joy-base: &joy-base
   networks:
     - joy_net
   environment:
-    PHX_HOST: "localhost"
     PHX_SERVER: "true"
     # dns_cluster will resolve "joy" → both container IPs via Docker network aliases below
     DNS_CLUSTER_QUERY: "joy"
