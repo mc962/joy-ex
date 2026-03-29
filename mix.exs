@@ -4,7 +4,7 @@ defmodule Joy.MixProject do
   def project do
     [
       app: :joy,
-      version: "1.1.19",
+      version: "1.2.0",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -60,6 +60,7 @@ defmodule Joy.MixProject do
        compile: false,
        depth: 1},
       {:swoosh, "~> 1.16"},
+      {:gen_smtp, "~> 1.2"},
       {:req, "~> 0.5"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},

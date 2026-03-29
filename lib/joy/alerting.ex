@@ -137,7 +137,7 @@ defmodule Joy.Alerting do
     email =
       new()
       |> to(to)
-      |> from({"Joy HL7 Engine", "noreply@joy.local"})
+      |> from({"Joy HL7 Engine", System.get_env("SMTP_USER", "noreply@joy.local")})
       |> subject(subject)
       |> text_body(body <> "\n\nLog in to Joy to review and take action.")
 

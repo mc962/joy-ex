@@ -9,7 +9,7 @@ defmodule Joy.Accounts.UserNotifier do
     email =
       new()
       |> to(recipient)
-      |> from({"Joy", "contact@example.com"})
+      |> from({"Joy", System.get_env("SMTP_USER", "contact@example.com")})
       |> subject(subject)
       |> text_body(body)
 
