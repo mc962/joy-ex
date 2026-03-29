@@ -37,6 +37,8 @@
 x-joy-base: &joy-base
   build: .
   env_file: .env
+  networks:
+    - joy_net
   environment:
     PHX_HOST: "localhost"
     PHX_SERVER: "true"

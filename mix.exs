@@ -4,7 +4,7 @@ defmodule Joy.MixProject do
   def project do
     [
       app: :joy,
-      version: "1.1.16",
+      version: "1.1.17",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
