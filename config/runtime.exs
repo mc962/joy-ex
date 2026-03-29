@@ -106,6 +106,12 @@ if config_env() == :prod do
 
   config :joy, JoyWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
+    # Allowed WebSocket origins. Defaults to just PHX_HOST. Set CHECK_ORIGINS
+    # to a comma-separated list to also allow per-node subdomains for debugging,
+    # e.g. "https://joy.example.com,https://joy-1.example.com,https://joy-2.example.com"
+    check_origin: System.get_env("CHECK_ORIGINS", "https://#{host}")
+                  |> String.split(",")
+                  |> Enum.map(&String.trim/1),
     http: [
       # Enable IPv6 and bind on all interfaces.
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
