@@ -24,8 +24,40 @@ const CodeEditor = {
 }
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+// longPollFallbackMs is explicitly disabled (null) for multi-node deployments.
+//
+// Background: Phoenix LiveView defaults to falling back from WebSocket to long
+// polling after 2500ms if the WebSocket handshake fails. In a multi-node setup
+// behind a reverse proxy / load balancer, this causes two problems:
+//
+// 1. sessionStorage caching (Phoenix issue #5720): when the fallback triggers,
+//    the decision is cached in sessionStorage under the key "phx:longpolling".
+//    Every subsequent page load in that browser tab then uses long polling for
+//    the rest of the session — even after the transient WebSocket failure is
+//    resolved. Users get a degraded experience with no way to recover without
+//    manually clearing sessionStorage.
+//
+// 2. Long polling is fundamentally incompatible with standard round-robin load
+//    balancing across multiple nodes. Each long-poll HTTP request can be routed
+//    to a different node, but the LiveView process lives on exactly one node.
+//    Requests that land on the wrong node get no response, causing the mount
+//    loop to bounce indefinitely between nodes.
+//
+// The correct architecture for long polling in a multi-node deployment is sticky
+// sessions at the load balancer (e.g. cookie-based affinity), so that all
+// requests from a given client always reach the node running their LiveView
+// process. Without sticky sessions, long polling does not work correctly.
+//
+// For this deployment: WebSocket is reliable (the reverse proxy is configured to
+// pass WebSocket upgrades through), so the fallback is unnecessary. Setting
+// longPollFallbackMs to null disables the fallback entirely, preventing the
+// sessionStorage caching issue and the multi-node bounce problem.
+//
+// If longPollFallbackMs ever needs to be re-enabled (e.g. in a network
+// environment where WebSocket is blocked), sticky sessions MUST be configured
+// at the load balancer before doing so.
 const liveSocket = new LiveSocket("/live", Socket, {
-  longPollFallbackMs: 2500,
+  longPollFallbackMs: null,
   params: {_csrf_token: csrfToken},
   hooks: {...colocatedHooks, CodeEditor},
 })

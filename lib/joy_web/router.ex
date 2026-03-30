@@ -59,6 +59,11 @@ defmodule JoyWeb.Router do
     end
   end
 
+  # Health check — unauthenticated, used by Caddy active health checks
+  scope "/", JoyWeb do
+    get "/health", HealthController, :check
+  end
+
   # OpenAPI spec — unauthenticated, read-only
   scope "/api" do
     pipe_through :openapi
