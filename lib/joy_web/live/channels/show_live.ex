@@ -15,6 +15,7 @@ defmodule JoyWeb.Channels.ShowLive do
   def mount(%{"id" => id}, _session, socket) do
     channel = Channels.get_channel!(String.to_integer(id), socket.assigns.current_scope)
     running? = Joy.ChannelManager.channel_running?(channel.id)
+    channel_node = Joy.ChannelManager.channel_node(channel.id)
 
     stats =
       if running?, do: Joy.Channel.Pipeline.get_stats(channel.id),
@@ -30,6 +31,7 @@ defmodule JoyWeb.Channels.ShowLive do
      |> assign(:page_title, channel.name)
      |> assign(:channel, channel)
      |> assign(:running?, running?)
+     |> assign(:channel_node, channel_node)
      |> assign(:stats, stats)
      |> assign(:show_transform_modal, false)
      |> assign(:show_dest_modal, false)
@@ -100,6 +102,16 @@ defmodule JoyWeb.Channels.ShowLive do
     {:noreply, assign(socket, :channel, channel)}
   end
 
+  def handle_info({:channel_started, id}, socket) when id == socket.assigns.channel.id do
+    channel_node = Joy.ChannelManager.channel_node(id)
+    stats = Joy.Channel.Pipeline.get_stats(id)
+    {:noreply, assign(socket, running?: true, channel_node: channel_node, stats: stats)}
+  end
+
+  def handle_info({:channel_stopped, id}, socket) when id == socket.assigns.channel.id do
+    {:noreply, assign(socket, running?: false, channel_node: nil)}
+  end
+
   def handle_info(_, socket), do: {:noreply, socket}
 
   @impl true
@@ -109,7 +121,8 @@ defmodule JoyWeb.Channels.ShowLive do
       Joy.ChannelManager.start_channel(channel)
       Channels.set_started(channel, true)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.started", "channel", channel.id, channel.name)
-      {:noreply, assign(socket, :running?, true)}
+      channel_node = Joy.ChannelManager.channel_node(channel.id)
+      {:noreply, assign(socket, running?: true, channel_node: channel_node)}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
@@ -121,7 +134,7 @@ defmodule JoyWeb.Channels.ShowLive do
       Joy.ChannelManager.stop_channel(channel.id)
       Channels.set_started(channel, false)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.stopped", "channel", channel.id, channel.name)
-      {:noreply, assign(socket, :running?, false)}
+      {:noreply, assign(socket, running?: false, channel_node: nil)}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
@@ -515,6 +528,14 @@ defmodule JoyWeb.Channels.ShowLive do
     |> Enum.map(&Atom.to_string/1)
   end
 
+  defp format_node(nil), do: nil
+  defp format_node(node) do
+    case Atom.to_string(node) do
+      "nonode@nohost" -> nil
+      str -> str |> String.split("@") |> List.last()
+    end
+  end
+
   @impl true
   def render(assigns) do
     assigns = assign(assigns, :adapter_labels, @adapter_labels)
@@ -531,6 +552,9 @@ defmodule JoyWeb.Channels.ShowLive do
                 <span :if={@running? and not @channel.paused} class="badge badge-success">Running</span>
                 <span :if={@running? and @channel.paused} class="badge badge-warning">Paused</span>
                 <span :if={not @running?} class="badge badge-ghost">Stopped</span>
+                <span :if={format_node(@channel_node)} class="badge badge-ghost font-mono text-xs">
+                  {format_node(@channel_node)}
+                </span>
                 <span :if={@channel.tls_enabled} class="badge badge-info badge-sm">TLS</span>
               </div>
               <p class="text-sm text-base-content/60 mt-0.5">

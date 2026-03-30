@@ -55,6 +55,14 @@ defmodule Joy.ChannelManager do
     end
   end
 
+  @doc "Returns the node atom where the channel is running, or nil if not running."
+  def channel_node(channel_id) do
+    case Horde.Registry.lookup(Joy.ChannelRegistry, channel_id) do
+      [{pid, _}] -> node(pid)
+      [] -> nil
+    end
+  end
+
   @impl true
   def init(_opts) do
     # Defer DB access until after Application.start completes

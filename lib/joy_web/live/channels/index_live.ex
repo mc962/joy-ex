@@ -14,7 +14,7 @@ defmodule JoyWeb.Channels.IndexLive do
      socket
      |> assign(:page_title, "Channels")
      |> assign(:channels, channels)
-     |> assign(:running_ids, running_ids(channels))
+     |> assign(:channel_nodes, channel_nodes_map(channels))
      |> assign(:organizations, Organizations.list_organizations(scope))
      |> assign(:show_modal, false)
      |> assign(:form, nil)
@@ -81,7 +81,7 @@ defmodule JoyWeb.Channels.IndexLive do
            socket
            |> assign(:show_modal, false)
            |> assign(:channels, channels)
-           |> assign(:running_ids, running_ids(channels))
+           |> assign(:channel_nodes, channel_nodes_map(channels))
            |> put_flash(:info, "Channel saved")}
 
         {:error, cs} ->
@@ -99,7 +99,7 @@ defmodule JoyWeb.Channels.IndexLive do
       Channels.delete_channel(channel)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.deleted", "channel", channel.id, channel.name)
       channels = Channels.list_channels(socket.assigns.current_scope)
-      {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
+      {:noreply, assign(socket, channels: channels, channel_nodes: channel_nodes_map(channels))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
@@ -111,7 +111,8 @@ defmodule JoyWeb.Channels.IndexLive do
       Joy.ChannelManager.start_channel(channel)
       Channels.set_started(channel, true)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.started", "channel", channel.id, channel.name)
-      {:noreply, assign(socket, :running_ids, MapSet.put(socket.assigns.running_ids, channel.id))}
+      channel_node = Joy.ChannelManager.channel_node(channel.id)
+      {:noreply, assign(socket, :channel_nodes, Map.put(socket.assigns.channel_nodes, channel.id, channel_node))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
@@ -124,23 +125,32 @@ defmodule JoyWeb.Channels.IndexLive do
       Joy.ChannelManager.stop_channel(id)
       Channels.set_started(channel, false)
       Joy.AuditLog.log(socket.assigns.current_scope.user, "channel.stopped", "channel", channel.id, channel.name)
-      {:noreply, assign(socket, :running_ids, MapSet.delete(socket.assigns.running_ids, channel.id))}
+      {:noreply, assign(socket, :channel_nodes, Map.delete(socket.assigns.channel_nodes, id))}
     else
       {:noreply, put_flash(socket, :error, "Admin access required.")}
     end
   end
 
   @impl true
-  # Structural changes (create/delete) need a full refresh including running_ids.
+  # Structural changes (create/delete) need a full refresh including channel_nodes.
   def handle_info({event, _}, socket) when event in [:channel_created, :channel_deleted] do
     channels = Channels.list_channels(socket.assigns.current_scope)
-    {:noreply, assign(socket, channels: channels, running_ids: running_ids(channels))}
+    {:noreply, assign(socket, channels: channels, channel_nodes: channel_nodes_map(channels))}
   end
 
-  # Config updates refresh channel data but must not overwrite the optimistic running_ids
+  # Config updates refresh channel data but must not overwrite the optimistic channel_nodes
   # set by start_channel/stop_channel — channel_running? may not reflect reality yet.
   def handle_info({:channel_updated, _}, socket) do
     {:noreply, assign(socket, :channels, Channels.list_channels(socket.assigns.current_scope))}
+  end
+
+  def handle_info({:channel_started, channel_id}, socket) do
+    channel_node = Joy.ChannelManager.channel_node(channel_id)
+    {:noreply, assign(socket, :channel_nodes, Map.put(socket.assigns.channel_nodes, channel_id, channel_node))}
+  end
+
+  def handle_info({:channel_stopped, channel_id}, socket) do
+    {:noreply, assign(socket, :channel_nodes, Map.delete(socket.assigns.channel_nodes, channel_id))}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -192,18 +202,23 @@ defmodule JoyWeb.Channels.IndexLive do
                 </td>
                 <td><span class="font-mono text-sm">{ch.mllp_port}</span></td>
                 <td>
-                  <span :if={ch.id in @running_ids} class="badge badge-success badge-sm">Running</span>
-                  <span :if={ch.id not in @running_ids} class="badge badge-ghost badge-sm">Stopped</span>
+                  <div class="flex flex-col gap-0.5">
+                    <span :if={Map.has_key?(@channel_nodes, ch.id)} class="badge badge-success badge-sm">Running</span>
+                    <span :if={not Map.has_key?(@channel_nodes, ch.id)} class="badge badge-ghost badge-sm">Stopped</span>
+                    <span :if={format_node(@channel_nodes[ch.id])} class="text-xs text-base-content/40 font-mono">
+                      {format_node(@channel_nodes[ch.id])}
+                    </span>
+                  </div>
                 </td>
                 <td class="text-sm text-base-content/60">{length(ch.transform_steps)}</td>
                 <td class="text-sm text-base-content/60">{length(ch.destination_configs)}</td>
                 <td>
                   <div class="flex items-center justify-end gap-1">
                     <%= if @current_scope.user.is_admin do %>
-                      <button :if={ch.id not in @running_ids}
+                      <button :if={not Map.has_key?(@channel_nodes, ch.id)}
                               phx-click="start_channel" phx-value-id={ch.id}
                               class="btn btn-ghost btn-xs text-success">Start</button>
-                      <button :if={ch.id in @running_ids}
+                      <button :if={Map.has_key?(@channel_nodes, ch.id)}
                               phx-click="stop_channel" phx-value-id={ch.id}
                               class="btn btn-ghost btn-xs">Stop</button>
                     <% end %>
@@ -257,9 +272,17 @@ defmodule JoyWeb.Channels.IndexLive do
     """
   end
 
-  defp running_ids(channels) do
+  defp channel_nodes_map(channels) do
     channels
     |> Enum.filter(&Joy.ChannelManager.channel_running?(&1.id))
-    |> MapSet.new(& &1.id)
+    |> Map.new(fn ch -> {ch.id, Joy.ChannelManager.channel_node(ch.id)} end)
+  end
+
+  defp format_node(nil), do: nil
+  defp format_node(node) do
+    case Atom.to_string(node) do
+      "nonode@nohost" -> nil
+      str -> str |> String.split("@") |> List.last()
+    end
   end
 end
